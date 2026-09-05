@@ -1,4 +1,4 @@
-"""Managed Identity login and persistent devtunnel hosting. Standard library only."""
+"""Persistent devtunnel hosting using the CLI's existing authentication context."""
 
 import argparse
 import json
@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 
@@ -31,35 +30,18 @@ def validate_config(config: dict) -> dict:
         raise ValueError(
             "Expected ports must be a nonempty list of unique port numbers"
         )
-    identity = config.get("identity", {})
-    if not isinstance(identity, dict) or identity.get("selector") not in [
-        "object-id",
-        "client-id",
-    ]:
-        raise ValueError("Select a Managed Identity object-id or client-id")
-    uuid.UUID(identity["id"])
     if config.get("allow_anonymous") is not False:
         raise ValueError("This service requires allow_anonymous=false")
     return config
 
 
-def login_args(config: dict) -> list[str]:
-    identity = config["identity"]
-    return [
-        config["binary"],
-        "user",
-        "login",
-        "--mi-" + identity["selector"],
-        identity["id"],
-    ]
-
-
 def run_cli(args: list[str], *, as_json: bool = False):
     result = subprocess.run(args, capture_output=True, text=True, timeout=45)
     if result.returncode:
-        # Never forward arbitrary credential-helper output into service logs.
+        # Never forward arbitrary CLI output into service logs.
         raise RuntimeError(
-            f"devtunnel {args[1]} failed with exit {result.returncode}; retry that command interactively for details"
+            f"devtunnel {args[1]} failed with exit {result.returncode}; "
+            "check the CLI login and tunnel permissions under the service's Unix user"
         )
     return json.loads(result.stdout) if as_json else None
 
@@ -127,8 +109,7 @@ def main() -> int:
     parser.add_argument("--config", required=True, type=Path)
     args = parser.parse_args()
     config = validate_config(json.loads(args.config.read_text()))
-    if args.action != "doctor":
-        run_cli(login_args(config))
+    # Authentication belongs to the CLI/operator, never to this service wrapper.
     inspect_remote(config)
     if args.action == "doctor":
         print(

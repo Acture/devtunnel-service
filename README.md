@@ -1,148 +1,122 @@
 # devtunnel-service
 
-Run an **existing persistent Microsoft Dev Tunnel** as a Linux systemd user
-service, authenticated with Azure Managed Identity. A separate daily timer renews
-the tunnel's 30-day lease without intentionally restarting its host connection.
+Run an existing persistent Microsoft Dev Tunnel as a Linux systemd user service.
+The wrapper manages hosting, restart, and daily renewal of the tunnel's 30-day
+lease. It uses the devtunnel CLI's **existing authentication context**.
 
-This is a small, standard-library-only deployment wrapper, not a tunnel server.
-It does not install the CLI, create tunnels, add ports, or grant access. Installation
-does **not** start hosting unless you explicitly pass `--start`.
+**Authentication is outside this repository's responsibility.** It never runs
+login or logout, selects an identity provider, stores tokens, or requires Azure
+Managed Identity. It also has no dependency on TRAPI or LiteLLM: the forwarded
+service can be SSH, a web application, or anything else supported by devtunnel.
 
 ## Requirements
 
-- Linux with a working systemd user manager and Python 3.10+.
-- The [official devtunnel CLI](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/get-started).
-  Command flags and JSON shapes were checked against CLI `1.0.2030+fc9273aa0f`.
-  A schema change fails closed and may require a wrapper update.
-- An Azure Managed Identity attached to the machine, with permission to manage
-  the tunnel. Supply its **object ID** or **client ID**, not a secret.
-- A persistent tunnel owned by, or appropriately granted to, that identity.
+- Linux with a working systemd user manager, and Python 3.10+.
+- The [official devtunnel CLI](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/get-started)
+  installed and authenticated **under the Unix user that runs the service**.
+- An existing persistent tunnel that this CLI session can host and update, with
+  its ports and access policies already configured.
 
-No Azure CLI, client secret, or copied bearer token is required. The devtunnel CLI
-owns its authentication cache. Instances under the same Unix user must use the
-same identity; use separate Unix users for separate identities.
+Check the existing CLI context with `devtunnel user show` and
+`devtunnel show TUNNEL_ID`. If login or permissions need attention, configure them
+independently using your usual workflow. Devtunnel supports Microsoft and GitHub
+accounts; this service does not choose between them. See the official
+[credential commands](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/cli-commands#manage-user-credentials).
 
-## Provision the tunnel once
+CLI flags and JSON shapes were checked against `1.0.2030+fc9273aa0f`. Unknown
+access-control schemas fail closed and may require a wrapper update. Only the
+Python standard library is required; the installer does not install the CLI.
 
-Run these commands yourself, substituting your identity and a unique tunnel ID:
+## Install
 
-```bash
-devtunnel user login --mi-object-id YOUR_MANAGED_IDENTITY_OBJECT_ID
-devtunnel create my-model-api --expiration 30d
-devtunnel port create my-model-api --port-number 4000 --protocol http
-```
+Keep the checkout and Python executable in a stable location: the service runs
+`host.py` directly from this checkout.
 
-Alternatively, use `--mi-client-id YOUR_MANAGED_IDENTITY_CLIENT_ID` when logging in.
-Do not pass `--allow-anonymous`. The wrapper requires private tunnel access and
-rejects anonymous allow entries at both the tunnel and port levels. It never
-changes access policies automatically.
-
-For the model gateway, run [trapi2litellm](https://github.com/Acture/trapi2litellm)
-on `127.0.0.1:4000` first. The tunnel forwards that same port; model discovery,
-status, and inference remain on one endpoint.
-
-## Install and start
-
-Clone this repository to a stable location: the service executes `host.py` from
-the checkout, so **keep the checkout and Python executable in place**.
+For example, to supervise an **already configured** tunnel with port 3000:
 
 ```bash
-python3 deploy.py \
-  --name model-api \
-  --tunnel-id my-model-api \
-  --port 4000 \
-  --mi-object-id YOUR_MANAGED_IDENTITY_OBJECT_ID \
-  --dry-run
+python3 deploy.py --name web --tunnel-id EXISTING_TUNNEL_ID --port 3000 --dry-run
 ```
 
-Replace the placeholder with a real UUID even for a dry run. If `devtunnel` is
-not on your PATH, supply `--binary /absolute/path/to/devtunnel`.
+Use your actual tunnel ID and port. Repeat `--port` for multiple ports; the set
+must match the remote tunnel exactly. Use `--binary /absolute/path/to/devtunnel`
+if the CLI is not on PATH.
 
-Remove `--dry-run` to install only; add `--start` to enable and start hosting.
-Re-running with `--start` restarts this instance and disconnects existing clients.
-Without `--start`, existing hosts continue running; applying changes to an active
-host requires an explicit restart.
+- `--dry-run`: print the units; no writes, network calls, or service changes.
+- Without `--dry-run`: install configuration and units, but do not start hosting.
+- Add `--start`: enable and start this instance. On redeployment, this explicitly
+  restarts the instance and disconnects its existing clients.
 
-Generated files, all outside Git:
+The installer does not create tunnels, add ports, change access policies, or
+change your CLI login. Existing hosts are not restarted without `--start`.
+
+Generated files are outside Git (`XDG_CONFIG_HOME` is respected):
 
 ```text
-~/.config/devtunnel-service/model-api.json
-~/.config/systemd/user/devtunnel-model-api.service
-~/.config/systemd/user/devtunnel-model-api-renew.service
-~/.config/systemd/user/devtunnel-model-api-renew.timer
+~/.config/devtunnel-service/web.json
+~/.config/systemd/user/devtunnel-web.service
+~/.config/systemd/user/devtunnel-web-renew.service
+~/.config/systemd/user/devtunnel-web-renew.timer
 ```
 
-`XDG_CONFIG_HOME` is respected. Configuration has mode `0600`; replaced files
-have a `.previous` backup. Unmanaged units and same-named system services are not
-overwritten or shadowed. For example, `--name ssh` is refused if a system-level
-`devtunnel-ssh.service` already exists.
+Configuration is mode `0600`; replaced files get a `.previous` backup. Unmanaged
+units and same-named system-level services are not overwritten or shadowed.
+For boot/logout persistence, an administrator may need to enable lingering for
+your Unix account. The installer does not change that setting.
 
-To start after an install-only deployment:
+## Operate
 
 ```bash
-systemctl --user enable --now devtunnel-model-api.service devtunnel-model-api-renew.timer
-systemctl --user status devtunnel-model-api.service
-journalctl --user -u devtunnel-model-api.service -f
+systemctl --user enable --now devtunnel-web.service devtunnel-web-renew.timer
+systemctl --user status devtunnel-web.service
+journalctl --user -u devtunnel-web.service -f
+python3 host.py doctor --config ~/.config/devtunnel-service/web.json
 ```
 
-The CLI's host output includes the assigned URL. For services to survive logout
-and start at boot, an administrator may need to enable lingering for your Unix
-account with `loginctl enable-linger USERNAME`. The installer does not change it.
+The CLI's host output includes the connection URL. `doctor` is read-only: it
+checks remote ports and access rules, not end-to-end connectivity or application
+health. All commands use the current CLI authentication context. If credentials
+expire or access is revoked, fix that context outside this wrapper; restarting
+the service is **not** a substitute for login or credential renewal.
 
-## Authentication from clients
+A host that exits is restarted after 30 seconds. A separate daily timer extends
+the tunnel lease to 30 days without intentionally restarting its host connection.
+Lease renewal is not authentication-token renewal.
 
-There are **two independent authentication layers**: private tunnel access and
-the application API key. Keeping one URL does not eliminate either layer.
+Stop the instance without deleting its tunnel:
 
-- Use `devtunnel connect TUNNEL_ID` from an authorized client account, then point
-  the SDK at the local forwarded port. The SDK only needs the gateway API key;
-  the CLI handles tunnel authentication.
-- Or access the tunnel HTTPS URL directly. Besides the application's
-  `Authorization: Bearer ...` header, send
-  `X-Tunnel-Authorization: tunnel <CONNECT_TOKEN>`. Obtain a short-lived connect
-  token through an authorized tunnel identity; do not commit it or assume it is
-  permanent. A gateway SDK base URL is the tunnel URL plus `/v1`.
+```bash
+systemctl --user disable --now devtunnel-web.service devtunnel-web-renew.timer
+```
 
-An ordinary personal login is not automatically authorized for a tunnel owned
-by a Managed Identity. Provision a specific client grant or connect token through
-your organization's approved access workflow. This wrapper does not do that.
-See Microsoft's [security documentation](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/security)
-and [CLI reference](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/cli-commands).
+## Access policy and scope
 
-## Checks and recovery
+This version retains a private-access guard: startup and renewal reject anonymous
+allow entries, unexpected ports, and missing or unrecognized access-control
+evidence. It does not modify remote ACLs. An existing anonymously accessible SSH
+tunnel is therefore **not** automatically migrated into this wrapper.
+
+These are periodic checks, not continuous enforcement. Restrict who can modify
+the remote tunnel. Client access and application authentication remain governed
+by their respective existing policies; neither is configured by this repository.
+See Microsoft's [security documentation](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/security).
+
+## Verification and migration
 
 ```bash
 python3 -m unittest discover -v
-python3 host.py doctor --config ~/.config/devtunnel-service/model-api.json
-systemctl --user list-timers devtunnel-model-api-renew.timer
 ```
 
-`doctor` is read-only and uses the current CLI login. It validates the exact
-remote port set and tunnel/port access-control evidence. It does **not** prove
-end-to-end connectivity or application health. `host` and `renew` log in using
-Managed Identity before doing those checks. A host process that exits is restarted
-after 30 seconds, with a fresh login. Daily lease renewal is separate from token
-refresh and does not certify indefinite authentication of an active connection.
+Tests cover validation, CLI arguments, no-login behavior (including authentication
+failure), generated units, dry-run behavior, private writes, and protection of
+unmanaged services. New tunnel provisioning and end-to-end client connectivity
+have not been tested by this repository; verify those for your deployment.
 
-Startup and renewal reject anonymous access, unexpected ports, and missing or
-unrecognized access-control evidence. These are checks, not continuous enforcement:
-restrict who can modify the remote tunnel, because access policy can change while
-a host is running. Login diagnostics are suppressed in service logs to avoid
-copying credential-helper output; repeat a failing login interactively if needed.
+Earlier revisions incorrectly required identity IDs and performed login on
+startup. Those options are removed. Re-run deployment without identity arguments
+to regenerate configuration; a legacy `identity` JSON field is ignored. The CLI
+context must already work for the service user. Existing system services outside
+this repository are not changed by this migration.
 
-Stop this instance without deleting its persistent tunnel:
-
-```bash
-systemctl --user disable --now devtunnel-model-api.service devtunnel-model-api-renew.timer
-```
-
-## Scope and verification
-
-The repository includes offline tests for validation, CLI argument construction,
-credential-output suppression, generated systemd units, dry-run behavior, and
-private file writes. Development also checked the installed CLI's read-only JSON
-schemas. It has **not** provisioned a new tunnel or demonstrated an end-to-end
-client connection; run that acceptance check for your deployment.
-
-Dev Tunnels is a development feature, not an SLA-backed production gateway.
-Check your organization's policies before forwarding company services.
+Dev Tunnels is a development feature without a production SLA. Follow your
+organization's policies when forwarding services.

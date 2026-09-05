@@ -19,10 +19,6 @@ def config():
         "tunnel_id": "example-api.region",
         "binary": "/usr/local/bin/devtunnel",
         "ports": [4000],
-        "identity": {
-            "selector": "object-id",
-            "id": "00000000-0000-0000-0000-000000000001",
-        },
         "allow_anonymous": False,
     }
 
@@ -49,37 +45,18 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(ports=ports), self.assertRaises(ValueError):
                 host.validate_config({**config(), "ports": ports})
 
-    def test_identity_uuid(self):
-        value = config()
-        value["identity"]["id"] = "not-a-uuid"
-        with self.assertRaises(ValueError):
-            host.validate_config(value)
+    def test_identity_is_not_required(self):
+        self.assertNotIn("identity", host.validate_config(config()))
 
-    def test_identity_selector(self):
-        value = config()
-        value["identity"]["selector"] = "token"
-        with self.assertRaises(ValueError):
-            host.validate_config(value)
+    def test_legacy_identity_field_is_unused(self):
+        # Old configs still load, but cannot select or switch a login anymore.
+        value = {**config(), "identity": {"selector": "unused", "id": "unused"}}
+        self.assertEqual(host.validate_config(value), value)
 
     def test_anonymous_must_be_explicit_false(self):
         for value in (True, None, "false", 0):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 host.validate_config({**config(), "allow_anonymous": value})
-
-    def test_login_selectors(self):
-        for selector in ("object-id", "client-id"):
-            value = config()
-            value["identity"]["selector"] = selector
-            self.assertEqual(
-                host.login_args(value),
-                [
-                    value["binary"],
-                    "user",
-                    "login",
-                    "--mi-" + selector,
-                    value["identity"]["id"],
-                ],
-            )
 
 
 class RemoteTests(unittest.TestCase):
@@ -171,7 +148,7 @@ class RemoteTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 1, "secret stdout", "secret stderr")
         with patch.object(host.subprocess, "run", return_value=result):
             with self.assertRaises(RuntimeError) as raised:
-                host.run_cli(["devtunnel", "user", "login"])
+                host.run_cli(["devtunnel", "show", "example-api"])
         self.assertNotIn("secret", str(raised.exception))
 
     def test_renew_checks_before_update(self):
@@ -185,8 +162,61 @@ class RemoteTests(unittest.TestCase):
             ):
                 with self.assertRaises(ValueError):
                     host.main()
+                run.assert_not_called()
+
+    def test_actions_never_login_or_logout(self):
+        for action in ("host", "renew", "doctor"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "config.json"
+                path.write_text(json.dumps(config()))
+                with (
+                    patch.object(
+                        sys, "argv", ["host.py", action, "--config", str(path)]
+                    ),
+                    patch.object(
+                        host,
+                        "run_cli",
+                        side_effect=[
+                            {"tunnel": tunnel()},
+                            {"accessControlEntries": []},
+                            None,
+                        ],
+                    ) as run,
+                    patch.object(host.os, "execv") as execute,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(host.main(), 0)
+                calls = [item.args[0] for item in run.call_args_list]
+                self.assertEqual(
+                    [args[1] for args in calls],
+                    ["show", "access", "update"]
+                    if action == "renew"
+                    else ["show", "access"],
+                )
+                if action == "host":
+                    execute.assert_called_once_with(
+                        config()["binary"],
+                        [config()["binary"], "host", config()["tunnel_id"]],
+                    )
+                else:
+                    execute.assert_not_called()
+
+    def test_auth_failure_does_not_attempt_relogin_or_host(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.json"
+            path.write_text(json.dumps(config()))
+            with (
+                patch.object(sys, "argv", ["host.py", "host", "--config", str(path)]),
+                patch.object(
+                    host, "run_cli", side_effect=RuntimeError("not logged in")
+                ) as run,
+                patch.object(host.os, "execv") as execute,
+            ):
+                with self.assertRaises(RuntimeError):
+                    host.main()
                 self.assertEqual(run.call_count, 1)
-                self.assertEqual(run.call_args.args[0], host.login_args(config()))
+                self.assertEqual(run.call_args.args[0][1], "show")
+                execute.assert_not_called()
 
 
 class DeploymentTests(unittest.TestCase):
@@ -199,8 +229,6 @@ class DeploymentTests(unittest.TestCase):
             "example-api",
             "--port",
             "4000",
-            "--mi-object-id",
-            config()["identity"]["id"],
             "--binary",
             sys.executable,
         ]
@@ -271,6 +299,17 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("StartLimitIntervalSec=0", text)
         self.assertIn("OnCalendar=daily", text)
 
+    def test_units_do_not_configure_authentication(self):
+        text = "\n".join(self.units().values())
+        for value in (
+            "Managed Identity",
+            "--mi-",
+            "user login",
+            "169.254.169.254",
+            "NO_PROXY",
+        ):
+            self.assertNotIn(value, text)
+
     def test_instance_name_validation(self):
         for name in ("../ssh", "SSH", "", "a\nb", "x" * 49):
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -302,8 +341,6 @@ class DeploymentTests(unittest.TestCase):
                 "example-api",
                 "--port",
                 "4000",
-                "--mi-object-id",
-                config()["identity"]["id"],
                 "--binary",
                 "/unused/devtunnel",
                 "--dry-run",

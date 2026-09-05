@@ -33,8 +33,6 @@ def render_units(
     prefix = "devtunnel-" + name
     command = f"{quote(python)} {quote(source / 'host.py')}"
     settings = f"""WorkingDirectory={str(source).replace("%", "%%")}
-Environment=NO_PROXY=127.0.0.1,localhost,169.254.169.254
-Environment=no_proxy=127.0.0.1,localhost,169.254.169.254
 Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
 NoNewPrivileges=true
@@ -43,7 +41,7 @@ PrivateTmp=true
     service = (
         MARKER
         + f"""[Unit]
-Description=Managed Identity devtunnel host ({name})
+Description=Persistent devtunnel host ({name})
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=0
@@ -117,9 +115,6 @@ def main() -> int:
         help="Existing persistent tunnel; never created implicitly",
     )
     parser.add_argument("--port", type=int, action="append", required=True)
-    identity = parser.add_mutually_exclusive_group(required=True)
-    identity.add_argument("--mi-object-id")
-    identity.add_argument("--mi-client-id")
     parser.add_argument("--binary", default=shutil.which("devtunnel"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -136,10 +131,6 @@ def main() -> int:
             "tunnel_id": args.tunnel_id,
             "binary": str(binary),
             "ports": sorted(args.port),
-            "identity": {
-                "selector": "object-id" if args.mi_object_id else "client-id",
-                "id": args.mi_object_id or args.mi_client_id,
-            },
             "allow_anonymous": False,
         }
     )

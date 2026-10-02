@@ -1,0 +1,56 @@
+[build-system]
+# Debian 13 ships hatchling 1.27 and Ubuntu 24.04 ships 1.21; native .deb
+# builds use those system copies, so keep the configuration valid for both.
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "devtunnel-service"
+dynamic = ["version"]
+description = "Run an existing persistent Microsoft Dev Tunnel as a Linux systemd user service"
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.10"
+authors = [{ name = "Acture", email = "acturea@gmail.com" }]
+keywords = ["devtunnel", "dev-tunnels", "systemd", "tunnel"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Networking",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Acture/devtunnel-service"
+Source = "https://github.com/Acture/devtunnel-service"
+
+[project.scripts]
+devtunnel-service = "devtunnel_service.cli:main"
+
+[dependency-groups]
+dev = ["ruff", "ty"]
+
+[tool.hatch.version]
+path = "src/devtunnel_service/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/devtunnel_service"]
+
+[tool.hatch.build.targets.sdist]
+# Distribution packaging (debian/, CI, scripts) stays out of the upstream sdist.
+only-include = ["src", "tests", "README.md", "LICENSE"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Malformed configuration and CLI JSON are invalid values for this tool;
+# ValueError is the documented failure for all of them.
+ignore = ["TRY004"]
+
+[tool.ty.environment]
+python-version = "3.10"

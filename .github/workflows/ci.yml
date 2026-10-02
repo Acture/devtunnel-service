@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv run --locked ruff format --check
+      - run: uv run --locked ruff check
+      - run: uv run --locked ty check
+      - run: shellcheck packaging/*.sh packaging/fake-devtunnel
+
+  test:
+    name: test (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv run --locked python -m unittest discover --start-directory tests -v
+
+  dist:
+    name: dist (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Start a systemd user manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 30); do
+            systemctl is-active --quiet "user@$uid.service" && break
+            sleep 1
+          done
+          systemctl is-active --quiet "user@$uid.service"
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >>"$GITHUB_ENV"
+      - name: Wheel, sdist, uvx and uv tool acceptance
+        run: packaging/check-dist.sh --systemd --out dist
+        env:
+          PYTHON: "3.10"
+      - if: matrix.runner == 'ubuntu-24.04'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  deb:
+    needs: dist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - name: Build the .deb from the accepted sdist on Debian 13
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/devtunnel_service/__init__.py)
+          sdist=dist/devtunnel_service-$version.tar.gz
+          build() { docker run --rm --volume "$PWD:/src" --workdir /src debian:13 packaging/build-deb.sh "$@"; }
+          build "$sdist" debs
+          # An older revision of the same source, to test upgrading to the release.
+          build "$sdist" debs-old "$version-0~acceptance1"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: debs
+          path: |
+            debs/
+            debs-old/
+          if-no-files-found: error
+
+  deb-check:
+    name: deb-check (${{ matrix.image }}, ${{ matrix.runner }})
+    needs: deb
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:13", "ubuntu:24.04"]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: debs
+      - name: Install, upgrade and remove
+        run: packaging/check-deb.sh "$IMAGE" debs-old/*.deb debs/*.deb
+        env:
+          IMAGE: ${{ matrix.image }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, dist, deb-check]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: debs
+          path: debs
+      - name: Publish the accepted artifacts as a GitHub Release
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/devtunnel_service/__init__.py)
+          test "$GITHUB_REF_NAME" = "v$version"
+          cp debs/debs/*.deb release/
+          (cd release && sha256sum -- * >SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Wheel, sdist and Debian/Ubuntu package for devtunnel-service $version." \
+            release/*
+        env:
+          GH_TOKEN: ${{ github.token }}

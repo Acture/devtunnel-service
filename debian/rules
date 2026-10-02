@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+export PYBUILD_TEST_ARGS = --start-directory {dir}/tests --top-level-directory {dir}/tests
+
+%:
+	dh $@ --buildsystem=pybuild
+
+execute_after_dh_auto_install:
+	PYTHONPATH=debian/devtunnel-service/usr/lib/python3/dist-packages \
+		help2man --no-info --no-discard-stderr \
+		--name="run an existing Microsoft Dev Tunnel as a systemd user service" \
+		--output=debian/devtunnel-service.1 \
+		debian/devtunnel-service/usr/bin/devtunnel-service

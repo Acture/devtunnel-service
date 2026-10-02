@@ -1,6 +1,5 @@
 """Install a user-level devtunnel host and daily lease-renewal timer."""
 
-import argparse
 import json
 import os
 import re
@@ -10,30 +9,31 @@ import sys
 import tempfile
 from pathlib import Path
 
-from host import validate_config
+from devtunnel_service.host import validate_config
 
-SOURCE = Path(__file__).resolve().parent
+PROGRAM = "devtunnel-service"
 MARKER = "# Managed by devtunnel-service\n"
+REMEDY = (
+    f"install {PROGRAM} persistently (uv tool install {PROGRAM}, the Debian package "
+    "or Homebrew) and run that command, or pass --entry-point"
+)
 
 
-def quote(value) -> str:
+def quote(value: str | Path) -> str:
     text = str(value)
     if any(ord(char) < 32 for char in text):
         raise ValueError("Control characters are not supported in service paths")
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
-def render_units(
-    name: str, config_path: Path, python: Path, source: Path
-) -> dict[str, str]:
+def render_units(name: str, config_path: Path, entry: Path) -> dict[str, str]:
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", name):
         raise ValueError(
             "Instance name must contain lowercase letters, digits and hyphens"
         )
     prefix = "devtunnel-" + name
-    command = f"{quote(python)} {quote(source / 'host.py')}"
-    settings = f"""WorkingDirectory={str(source).replace("%", "%%")}
-Environment=PYTHONDONTWRITEBYTECODE=1
+    command = quote(entry)
+    settings = """Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
@@ -106,57 +106,94 @@ def write_private(path: Path, text: str) -> None:
             os.unlink(temporary)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--name", required=True)
-    parser.add_argument(
-        "--tunnel-id",
-        required=True,
-        help="Existing persistent tunnel; never created implicitly",
-    )
-    parser.add_argument("--port", type=int, action="append", required=True)
-    parser.add_argument("--binary", default=shutil.which("devtunnel"))
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--start",
-        action="store_true",
-        help="Explicitly start hosting after installation",
-    )
-    args = parser.parse_args()
-    if not args.binary:
+def transient_roots() -> list[Path]:
+    """Directories whose contents may disappear: temporary files and caches (uvx)."""
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    roots = [tempfile.gettempdir(), "/tmp", "/var/tmp", cache]
+    roots.append(os.environ.get("UV_CACHE_DIR") or "")
+    return [Path(root).expanduser().resolve() for root in roots if root]
+
+
+def persistence_problem(entry: Path) -> str | None:
+    """Explain why units must not reference ``entry``; None if it is persistent."""
+    # Check the PATH-visible link and its target: both must survive the session.
+    for path in (entry, entry.resolve()):
+        for root in transient_roots():
+            if path.is_relative_to(root):
+                return f"{path} is inside the temporary or cache directory {root}"
+        environment = next(
+            (parent for parent in path.parents if (parent / "pyvenv.cfg").is_file()),
+            None,
+        )
+        if environment and (environment.parent / "pyproject.toml").is_file():
+            return f"{path} belongs to the environment of the source tree {environment.parent}"
+    return None
+
+
+def entry_point(explicit: Path | None) -> Path:
+    found = explicit or shutil.which(PROGRAM)
+    if not found:
+        raise ValueError(f"No {PROGRAM} command on PATH; {REMEDY}")
+    # Keep symlinks: /usr/bin, ~/.local/bin and Homebrew's bin stay valid across
+    # upgrades, while their versioned targets do not.
+    return Path(found).expanduser().absolute()
+
+
+def deploy(
+    name: str,
+    tunnel_id: str,
+    ports: list[int],
+    binary: str | None,
+    entry: Path | None,
+    *,
+    dry_run: bool,
+    start: bool,
+) -> int:
+    binary = binary or shutil.which("devtunnel")
+    if not binary:
         raise ValueError("Install the official devtunnel CLI first, or pass --binary")
-    binary = Path(args.binary).expanduser().resolve()
+    devtunnel = Path(binary).expanduser().resolve()
     config = validate_config(
         {
-            "tunnel_id": args.tunnel_id,
-            "binary": str(binary),
-            "ports": sorted(args.port),
+            "tunnel_id": tunnel_id,
+            "binary": str(devtunnel),
+            "ports": sorted(ports),
             "allow_anonymous": False,
         }
     )
     config_root = (
-        Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
         .expanduser()
         .resolve()
     )
     config_dir = config_root / "devtunnel-service"
-    config_path = config_dir / (args.name + ".json")
-    if config_dir == SOURCE or SOURCE in config_dir.parents:
-        raise ValueError("Runtime config must live outside the source checkout")
-    units = render_units(args.name, config_path, Path(sys.executable).resolve(), SOURCE)
-    if args.dry_run:
-        for name, text in units.items():
-            print(f"# {name}\n{text}")
+    config_path = config_dir / (name + ".json")
+    command = entry_point(entry)
+    problem = persistence_problem(command)
+    units = render_units(name, config_path, command)
+    if dry_run:
+        for unit, text in units.items():
+            print(f"# {unit}\n{text}")
+        if problem:
+            print(
+                f"Note: deployment would refuse this entry point: {problem}; {REMEDY}.",
+                file=sys.stderr,
+            )
         return 0
-    if not sys.platform.startswith("linux") or not os.access(binary, os.X_OK):
+    if problem:
+        raise ValueError(f"Refusing a non-persistent entry point: {problem}; {REMEDY}")
+    if not sys.platform.startswith("linux") or not os.access(devtunnel, os.X_OK):
         raise ValueError("Linux/systemd and an executable devtunnel CLI are required")
+    if not os.access(command, os.X_OK):
+        raise ValueError(f"Entry point {command} is not executable; {REMEDY}")
     # Do not shadow an existing system-level tunnel (especially the SSH tunnel).
-    for name in units:
+    for unit in units:
         result = subprocess.run(
-            ["systemctl", "--system", "show", name, "-p", "LoadState", "--value"],
+            ["systemctl", "--system", "show", unit, "-p", "LoadState", "--value"],
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
         if result.returncode != 0 or not result.stdout.strip():
             raise ValueError(
@@ -164,17 +201,17 @@ def main() -> int:
             )
         if result.stdout.strip() != "not-found":
             raise ValueError(
-                f"A system unit already uses {name}; choose a different instance name"
+                f"A system unit already uses {unit}; choose a different instance name"
             )
     unit_dir = config_root / "systemd/user"
-    for name in units:
-        path = unit_dir / name
+    for unit in units:
+        path = unit_dir / unit
         if path.exists() and not path.read_text().startswith(MARKER):
             raise ValueError(f"Refusing to replace unmanaged unit {path}")
     with tempfile.TemporaryDirectory(prefix="devtunnel-units-") as folder:
         paths = []
-        for name, text in units.items():
-            path = Path(folder) / name
+        for unit, text in units.items():
+            path = Path(folder) / unit
             path.write_text(text)
             paths.append(str(path))
         subprocess.run(["systemd-analyze", "--user", "verify", *paths], check=True)
@@ -186,15 +223,15 @@ def main() -> int:
             config_path.with_suffix(".json.previous"), config_path.read_text()
         )
     write_private(config_path, json.dumps(config, indent=2) + "\n")
-    for name, text in units.items():
-        path = unit_dir / name
+    for unit, text in units.items():
+        path = unit_dir / unit
         if path.exists() and path.read_text() != text:
             write_private(path.with_suffix(path.suffix + ".previous"), path.read_text())
         write_private(path, text)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    service = "devtunnel-" + args.name + ".service"
-    timer = "devtunnel-" + args.name + "-renew.timer"
-    if args.start:
+    service = "devtunnel-" + name + ".service"
+    timer = "devtunnel-" + name + "-renew.timer"
+    if start:
         subprocess.run(["systemctl", "--user", "enable", service, timer], check=True)
         subprocess.run(["systemctl", "--user", "restart", service, timer], check=True)
         print(
@@ -206,12 +243,5 @@ def main() -> int:
         )
         print("To start: systemctl --user enable --now " + service + " " + timer)
     print("Config:", config_path)
+    print("Entry point:", command)
     return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as error:
-        print(f"{type(error).__name__}: {error}", file=sys.stderr)
-        sys.exit(1)

@@ -1,15 +1,23 @@
 """Persistent devtunnel hosting using the CLI's existing authentication context."""
 
-import argparse
 import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
+from typing import Literal, TypedDict, cast
+
+Action = Literal["host", "renew", "doctor"]
 
 
-def validate_config(config: dict) -> dict:
+class Config(TypedDict):
+    tunnel_id: str
+    binary: str
+    ports: list[int]
+    allow_anonymous: bool
+
+
+def validate_config(config: object) -> Config:
     if not isinstance(config, dict):
         raise ValueError("Configuration must be a JSON object")
     tunnel_id = config.get("tunnel_id")
@@ -17,8 +25,8 @@ def validate_config(config: dict) -> dict:
         r"[A-Za-z0-9][A-Za-z0-9._-]*", tunnel_id
     ):
         raise ValueError("A valid explicit tunnel ID is required")
-    binary = Path(config["binary"])
-    if not binary.is_absolute():
+    binary = config.get("binary")
+    if not isinstance(binary, str) or not Path(binary).is_absolute():
         raise ValueError("devtunnel binary path must be absolute")
     ports = config.get("ports")
     if (
@@ -32,11 +40,13 @@ def validate_config(config: dict) -> dict:
         )
     if config.get("allow_anonymous") is not False:
         raise ValueError("This service requires allow_anonymous=false")
-    return config
+    return cast(Config, config)
 
 
-def run_cli(args: list[str], *, as_json: bool = False):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=45)
+def run_cli(args: list[str], *, as_json: bool = False) -> object:
+    result = subprocess.run(
+        args, capture_output=True, text=True, timeout=45, check=False
+    )
     if result.returncode:
         # Never forward arbitrary CLI output into service logs.
         raise RuntimeError(
@@ -46,7 +56,7 @@ def run_cli(args: list[str], *, as_json: bool = False):
     return json.loads(result.stdout) if as_json else None
 
 
-def require_private_access(access) -> None:
+def require_private_access(access: object) -> None:
     if isinstance(access, dict):
         entries = access.get("entries")
     elif isinstance(access, list):
@@ -64,7 +74,7 @@ def require_private_access(access) -> None:
             raise ValueError("Anonymous tunnel access is enabled; refusing to host")
 
 
-def validate_remote(tunnel: dict, expected_ports: list[int]) -> None:
+def validate_remote(tunnel: object, expected_ports: list[int]) -> None:
     if not isinstance(tunnel, dict):
         raise ValueError("Missing tunnel object")
     require_private_access(tunnel.get("accessControl"))
@@ -87,31 +97,29 @@ def validate_remote(tunnel: dict, expected_ports: list[int]) -> None:
             require_private_access(entry["accessControl"])
 
 
-def inspect_remote(config: dict) -> None:
+def inspect_remote(config: Config) -> None:
     binary, tunnel_id = config["binary"], config["tunnel_id"]
     data = run_cli([binary, "show", tunnel_id, "--json"], as_json=True)
-    validate_remote(data["tunnel"], config["ports"])
+    if not isinstance(data, dict):
+        raise ValueError("Unrecognized tunnel schema; refusing to host")
+    validate_remote(data.get("tunnel"), config["ports"])
     for port in config["ports"]:
         # Access list includes effective tunnel/port ACL evidence.
         data = run_cli(
             [binary, "access", "list", tunnel_id, "--port-number", str(port), "--json"],
             as_json=True,
         )
-        entries = data.get("accessControlEntries")
+        entries = data.get("accessControlEntries") if isinstance(data, dict) else None
         if entries is None:
             raise ValueError("Unrecognized port access-list schema; refusing to host")
         require_private_access(entries)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["host", "renew", "doctor"])
-    parser.add_argument("--config", required=True, type=Path)
-    args = parser.parse_args()
-    config = validate_config(json.loads(args.config.read_text()))
+def run(action: Action, config_path: Path) -> int:
+    config = validate_config(json.loads(config_path.read_text()))
     # Authentication belongs to the CLI/operator, never to this service wrapper.
     inspect_remote(config)
-    if args.action == "doctor":
+    if action == "doctor":
         print(
             json.dumps(
                 {
@@ -122,7 +130,7 @@ def main() -> int:
                 }
             )
         )
-    elif args.action == "renew":
+    elif action == "renew":
         run_cli(
             [config["binary"], "update", config["tunnel_id"], "--expiration", "30d"]
         )
@@ -131,11 +139,3 @@ def main() -> int:
         # No shell and no token on the command line. systemd supervises the CLI.
         os.execv(config["binary"], [config["binary"], "host", config["tunnel_id"]])
     return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as error:
-        print(f"{type(error).__name__}: {error}", file=sys.stderr)
-        sys.exit(1)

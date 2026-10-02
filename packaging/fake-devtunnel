@@ -1,0 +1,13 @@
+#!/bin/sh
+# Offline stand-in for Microsoft's devtunnel CLI, used only by the packaging
+# acceptance scripts. It logs each invocation next to itself and serves a
+# private tunnel that forwards port 4000.
+set -eu
+printf '%s\n' "$*" >>"$0.log"
+case "${1-}" in
+show) echo '{"tunnel":{"accessControl":[],"ports":[{"portNumber":4000}]}}' ;;
+access) echo '{"accessControlEntries":[]}' ;;
+update) ;;
+host) exec sleep infinity ;;
+*) exit 2 ;;
+esac

@@ -1,0 +1,33 @@
+Source: devtunnel-service
+Section: net
+Priority: optional
+Maintainer: Acture <acturea@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ help2man,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-hatchling,
+Standards-Version: 4.7.2
+Homepage: https://github.com/Acture/devtunnel-service
+Vcs-Browser: https://github.com/Acture/devtunnel-service
+Vcs-Git: https://github.com/Acture/devtunnel-service.git
+Rules-Requires-Root: no
+
+Package: devtunnel-service
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+Recommends:
+ systemd,
+Description: run an existing Microsoft Dev Tunnel as a systemd user service
+ devtunnel-service supervises an existing persistent Microsoft Dev Tunnel with
+ a systemd user service, restarts its host and renews the tunnel's 30-day lease
+ daily. It uses the devtunnel CLI's existing login and refuses to host tunnels
+ that allow anonymous access or expose ports other than the configured ones.
+ .
+ The devtunnel CLI is not packaged by Debian or Ubuntu and is not installed by
+ this package. Install and sign in to Microsoft's CLI separately; see
+ /usr/share/doc/devtunnel-service/README.Debian.

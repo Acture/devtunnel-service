@@ -36,7 +36,9 @@ fi
 apt-get build-dep -y -qq ./ >/dev/null
 dpkg-buildpackage -b -us -uc
 if [[ -z $version ]]; then
-	lintian --fail-on error,warning --info --display-info ../*.changes
+	# Not uploaded to Debian, so there is no ITP bug to close.
+	lintian --fail-on error,warning --info --display-info \
+		--suppress-tags initial-upload-closes-no-bugs ../*.changes
 fi
 mkdir -p -- "$out"
 cp -- ../*.deb "$out/"

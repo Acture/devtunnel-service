@@ -67,6 +67,12 @@ EOF
 docker run --detach --name "$name" --privileged --cgroupns=host \
 	--volume /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
 	--volume "$debs:/debs:ro" "$tag" >/dev/null
+# loginctl and is-system-running --wait need the system bus, which appears
+# shortly after boot starts; "degraded" is acceptable in a container.
+for _ in $(seq 60); do
+	root test -S /run/dbus/system_bus_socket && break
+	sleep 1
+done
 root timeout 120 systemctl is-system-running --wait >/dev/null || true
 uid=$(root id -u tester)
 root loginctl enable-linger tester

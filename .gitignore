@@ -11,3 +11,6 @@ dist/
 build/
 .pybuild/
 .acceptance/
+target/
+# Binary crate: the lockfile pins the SDK and every dependency.
+!Cargo.lock

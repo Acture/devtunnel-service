@@ -1,0 +1,54 @@
+devtunnel-service for Debian and Ubuntu
+=======================================
+
+This package installs the devtunnel-service command only. Installing,
+upgrading or removing it never signs in to devtunnel, changes tunnel access
+rules, writes user configuration, or starts services.
+
+The devtunnel CLI
+-----------------
+
+Microsoft's devtunnel CLI is not packaged by Debian or Ubuntu and this package
+does not download it. Install it as the Unix user that will run the service,
+with Microsoft's installer (Linux x64 and arm64; it writes ~/bin/devtunnel):
+
+  curl -sL https://aka.ms/DevTunnelCliInstall | bash
+
+See https://learn.microsoft.com/azure/developer/dev-tunnels/get-started .
+The installer always fetches Microsoft's latest CLI. devtunnel-service was
+checked against CLI version 1.0.2030+fc9273aa0f (see "devtunnel --version");
+newer CLIs whose JSON output changes make startup and renewal fail closed.
+Sign in and confirm access to the tunnel with the CLI itself:
+
+  devtunnel user show
+  devtunnel show TUNNEL_ID
+
+Deploying an instance
+---------------------
+
+As the service user, preview and then install the user units:
+
+  devtunnel-service deploy --name web --tunnel-id TUNNEL_ID --port 3000 --dry-run
+  devtunnel-service deploy --name web --tunnel-id TUNNEL_ID --port 3000 --start
+
+The units run /usr/bin/devtunnel-service, so they keep working across package
+upgrades. An upgrade does not restart a running host; restart the instance to
+use the new version:
+
+  systemctl --user restart devtunnel-web.service
+
+Removing the package
+--------------------
+
+Stop and remove each instance before removing the package; otherwise systemd
+keeps restarting a host whose command no longer exists:
+
+  systemctl --user disable --now devtunnel-web.service devtunnel-web-renew.timer
+  rm ~/.config/systemd/user/devtunnel-web.service \
+     ~/.config/systemd/user/devtunnel-web-renew.service \
+     ~/.config/systemd/user/devtunnel-web-renew.timer
+  systemctl --user daemon-reload
+
+Removing or purging the package leaves ~/.config/devtunnel-service, the
+devtunnel CLI and its login untouched. Delete the instance configuration
+yourself if it is no longer needed.

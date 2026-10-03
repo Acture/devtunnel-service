@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+export PYBUILD_TEST_ARGS = --start-directory {dir}/tests --top-level-directory {dir}/tests
+
+# pybuild installs for the default interpreter; dh_python3 moves it later.
+site = debian/devtunnel-service/usr/lib/python$(shell py3versions -dv)/dist-packages
+command = debian/devtunnel-service/usr/bin/devtunnel-service
+
+%:
+	dh $@ --buildsystem=pybuild
+
+execute_after_dh_auto_install:
+	PYTHONPATH=$(site) $(command) --version
+	PYTHONPATH=$(site) help2man --no-info --no-discard-stderr \
+		--name="run an existing Microsoft Dev Tunnel as a systemd user service" \
+		--output=debian/devtunnel-service.1 $(command)

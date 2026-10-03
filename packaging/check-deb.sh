@@ -128,8 +128,10 @@ root test ! -e /usr/bin/devtunnel-service
 root test ! -e /usr/lib/python3/dist-packages/devtunnel_service
 user 'test -f ~/.config/devtunnel-service/web.json
 test -f ~/.config/systemd/user/devtunnel-web.service'
-root apt-get purge -y -qq devtunnel-service >/dev/null
-root sh -c '! dpkg-query -W devtunnel-service 2>/dev/null'
+# Without conffiles, remove may already purge; dpkg --purge handles both cases
+# (apt no longer knows a package that was installed from a local file).
+root dpkg --purge devtunnel-service >/dev/null
+root sh -c '! dpkg -s devtunnel-service >/dev/null 2>&1'
 user 'test -f ~/.config/devtunnel-service/web.json
 test -f ~/.config/systemd/user/devtunnel-web-renew.timer'
 

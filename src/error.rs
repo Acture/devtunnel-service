@@ -123,10 +123,12 @@ impl Error {
 		self.transient
 	}
 
+	#[cfg(test)]
 	pub(crate) fn name(&self) -> &'static str {
 		self.name
 	}
 
+	#[cfg(test)]
 	pub(crate) fn message(&self) -> &str {
 		&self.message
 	}

@@ -9,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use serde_json::Value;
 use tunnels::connections::{RelayHandle, RelayTunnelHost};
@@ -24,6 +25,27 @@ use crate::error::{Error, Result};
 pub(crate) const UNKNOWN_CLUSTER: &str =
 	"Cannot determine the tunnel's cluster; configure the full tunnel ID (ID.CLUSTER)";
 pub(crate) const UNRECOGNIZED_SCHEMA: &str = "Unrecognized tunnel schema; refusing to host";
+
+/// Limit for one management request. The SDK's HTTP client has none.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Limit for registering the endpoint and opening the relay connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs `request` within `limit`; running out of time is transient.
+async fn bounded<T>(
+	limit: Duration,
+	what: &str,
+	request: impl Future<Output = Result<T>>,
+) -> Result<T> {
+	tokio::time::timeout(limit, request)
+		.await
+		.unwrap_or_else(|_| {
+			Err(Error::transient(format!(
+				"{what} did not finish within {}s",
+				limit.as_secs()
+			)))
+		})
+}
 
 /// Reads of the tunnel.
 pub(crate) trait Api {
@@ -129,10 +151,13 @@ impl Api for Service {
 			include_access_control: true,
 			..Default::default()
 		};
-		self.mgmt
-			.get_tunnel(&self.locator, &options)
-			.await
-			.map_err(|error| read_error(&error))
+		bounded(REQUEST_TIMEOUT, "Reading the tunnel", async {
+			self.mgmt
+				.get_tunnel(&self.locator, &options)
+				.await
+				.map_err(|error| read_error(&error))
+		})
+		.await
 	}
 }
 
@@ -177,15 +202,17 @@ fn status_error(code: u16) -> Error {
 
 /// The locator for `tunnel_id`: `ID.CLUSTER` splits at its first dot;
 /// a bare ID takes its cluster from the `clusterId` claim of `token` (a JWT
-/// whose payload is decoded, never verified or logged). Without either:
-/// `ValueError` [`UNKNOWN_CLUSTER`].
+/// whose payload is decoded, never verified or logged). Only a host-name
+/// label (ASCII letters, digits and `-`) is a cluster: the SDK panics on one
+/// that cannot be part of a host name. Otherwise: `ValueError`
+/// [`UNKNOWN_CLUSTER`].
 pub(crate) fn locator(tunnel_id: &str, token: &Secret) -> Result<TunnelLocator> {
 	let (id, cluster) = match tunnel_id.split_once('.') {
 		Some((id, cluster)) => (id, Some(cluster.to_owned())),
 		None => (tunnel_id, cluster_claim(token.expose())),
 	};
 	match cluster {
-		Some(cluster) if !id.is_empty() && !cluster.is_empty() => Ok(TunnelLocator::ID {
+		Some(cluster) if !id.is_empty() && is_label(&cluster) => Ok(TunnelLocator::ID {
 			cluster,
 			id: id.to_owned(),
 		}),
@@ -193,18 +220,18 @@ pub(crate) fn locator(tunnel_id: &str, token: &Secret) -> Result<TunnelLocator> 
 	}
 }
 
-/// The `clusterId` claim of a JWT. Only a host-name label (ASCII letters,
-/// digits and `-`) is accepted: the SDK panics on a cluster that cannot be
-/// part of a host name.
+fn is_label(text: &str) -> bool {
+	!text.is_empty()
+		&& text
+			.bytes()
+			.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// The `clusterId` claim of a JWT.
 fn cluster_claim(token: &str) -> Option<String> {
 	let payload = base64url_decode(token.split('.').nth(1)?)?;
 	let claims: Value = serde_json::from_slice(&payload).ok()?;
-	let cluster = claims.get("clusterId")?.as_str()?;
-	let label = !cluster.is_empty()
-		&& cluster
-			.bytes()
-			.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
-	label.then(|| cluster.to_owned())
+	Some(claims.get("clusterId")?.as_str()?.to_owned())
 }
 
 /// Decodes base64url (RFC 4648 section 5), with or without padding.
@@ -266,10 +293,13 @@ impl Relay for SdkRelay {
 			port_number: port,
 			..Default::default()
 		};
-		self.host
-			.add_port(&tunnel_port)
-			.await
-			.map_err(|error| Error::runtime(format!("Cannot forward port {port}: {error}")))?;
+		bounded(REQUEST_TIMEOUT, &format!("Forwarding port {port}"), async {
+			self.host
+				.add_port(&tunnel_port)
+				.await
+				.map_err(|error| Error::runtime(format!("Cannot forward port {port}: {error}")))
+		})
+		.await?;
 		self.ports.push(port);
 		Ok(())
 	}
@@ -277,11 +307,13 @@ impl Relay for SdkRelay {
 	/// Logs the forwarding URL of each port from the endpoint's
 	/// `port_uri_format`, when the service provides one.
 	async fn connect(&mut self, token: &Secret) -> Result<Connection> {
-		let handle = self
-			.host
-			.connect(token.expose())
-			.await
-			.map_err(|error| Error::transient(format!("Relay connection failed: {error}")))?;
+		let handle = bounded(CONNECT_TIMEOUT, "Connecting to the relay", async {
+			self.host
+				.connect(token.expose())
+				.await
+				.map_err(|error| Error::transient(format!("Relay connection failed: {error}")))
+		})
+		.await?;
 		let endpoint = handle.endpoint();
 		self.host_id = Some(endpoint.host_id.clone());
 		if let Some(format) = &endpoint.port_uri_format {
@@ -300,12 +332,15 @@ impl Relay for SdkRelay {
 
 	async fn unregister(&mut self, auth: &Authorization) -> Result<()> {
 		self.auth.set(auth);
-		match self.host.unregister().await {
-			Ok(_) => Ok(()),
-			Err(error) => Err(Error::transient(format!(
-				"Cannot unregister this host: {error}"
-			))),
-		}
+		bounded(REQUEST_TIMEOUT, "Unregistering this host", async {
+			match self.host.unregister().await {
+				Ok(_) => Ok(()),
+				Err(error) => Err(Error::transient(format!(
+					"Cannot unregister this host: {error}"
+				))),
+			}
+		})
+		.await
 	}
 
 	fn host_id(&self) -> Option<&str> {
@@ -387,15 +422,11 @@ mod tests {
 	}
 
 	#[test]
-	fn explicit_cluster_splits_at_first_dot() {
+	fn explicit_cluster_is_the_label_after_the_first_dot() {
 		let opaque = Secret::new("opaque").unwrap();
 		assert_eq!(
 			located("example-api.usw2", &opaque),
 			("example-api".to_owned(), "usw2".to_owned())
-		);
-		assert_eq!(
-			located("a.b.c", &opaque),
-			("a".to_owned(), "b.c".to_owned())
 		);
 		assert_eq!(
 			located("example-api.usw2", &claims(r#"{"clusterId":"euw"}"#)).1,
@@ -404,6 +435,10 @@ mod tests {
 		let claimed = claims(r#"{"clusterId":"usw2"}"#);
 		unknown("example-api.", &claimed);
 		unknown(".usw2", &claimed);
+		// A cluster must be one host-name label, or the SDK panics building URLs.
+		for id in ["a.b.c", "a..b", "a.us_w2"] {
+			unknown(id, &opaque);
+		}
 	}
 
 	#[test]

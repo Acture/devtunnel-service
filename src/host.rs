@@ -116,16 +116,17 @@ pub(crate) async fn renew(
 ///
 /// 1. Read and validate the tunnel (fatal on failure), then `add_port` each
 ///    configured port once.
-/// 2. Never displace a live host: while [`crate::remote::other_host`]
-///    holds, stand by, polling every [`STANDBY_POLL`].
-/// 3. Mint a fresh host token and connect. Transient connection failures
-///    retry with backoff from [`BACKOFF_INITIAL`] up to [`BACKOFF_MAX`].
-/// 4. When the connection ends, read and validate the tunnel again. If
-///    another host is connected, the host was displaced: log it, unregister
-///    this host's endpoint (so no other instance waits on it; a failure is
-///    logged and ignored), stand by as in 2, and log the takeover. Otherwise
-///    reconnect with backoff; a connection that lasted
-///    [`STABLE_CONNECTION`] resets the backoff.
+/// 2. Never displace a live host: before every connection attempt the tunnel
+///    has just been read and validated, and while [`crate::remote::other_host`]
+///    holds, this host unregisters its endpoint (once it has one, so no other
+///    instance waits on it; a failure is logged and ignored) and stands by,
+///    polling every [`STANDBY_POLL`], then logs the takeover.
+/// 3. Mint a fresh host token and connect. Transient failures retry with
+///    backoff from [`BACKOFF_INITIAL`] up to [`BACKOFF_MAX`].
+/// 4. When the connection ends, read and validate the tunnel at once: if
+///    another host is connected, this host was displaced (logged as such).
+///    Otherwise wait out the backoff and read again before reconnecting; a
+///    connection that lasted [`STABLE_CONNECTION`] resets the backoff.
 ///
 /// Transient errors retry; other errors return, so the process exits and
 /// systemd restarts it. While standing by, every error except a failed
@@ -188,19 +189,27 @@ async fn serve<R: Relay>(
 	for &port in &config.ports {
 		relay.add_port(port, &auth).await?;
 	}
-	if remote::other_host(&tunnel, relay.host_id()) {
-		info(format!("Another host is serving tunnel {id}; standing by"));
-		standby(config, credentials, api, relay.host_id()).await?;
-		info(format!(
-			"No other host is connected to tunnel {id}; taking over"
-		));
-	}
 	let mut backoff = BACKOFF_INITIAL;
+	let mut occupied = remote::other_host(&tunnel, relay.host_id())
+		.then(|| format!("Another host is serving tunnel {id}; standing by"));
 	loop {
+		if let Some(reason) = occupied.take() {
+			info(reason);
+			if relay.host_id().is_some() {
+				unregister(config, credentials, relay).await;
+			}
+			standby(config, credentials, api, relay.host_id()).await?;
+			info(format!(
+				"No other host is connected to tunnel {id}; taking over"
+			));
+		}
 		let connection = match connect(credentials, relay).await {
 			Ok(connection) => connection,
 			Err(error) if error.is_transient() => {
 				retry(&mut backoff, &error).await;
+				occupied = recheck(config, credentials, api, relay, &mut backoff)
+					.await?
+					.then(|| format!("Another host is serving tunnel {id}; standing by"));
 				continue;
 			}
 			Err(error) => return Err(error),
@@ -212,31 +221,42 @@ async fn serve<R: Relay>(
 		if connected.elapsed() >= STABLE_CONNECTION {
 			backoff = BACKOFF_INITIAL;
 		}
-		let tunnel = loop {
-			match fetch(credentials, api).await {
-				Ok(tunnel) => break tunnel,
-				Err(error) if error.is_transient() => retry(&mut backoff, &error).await,
-				Err(error) => return Err(error),
-			}
-		};
-		remote::validate(&tunnel, &config.ports, config.allow_anonymous)?;
-		if remote::other_host(&tunnel, relay.host_id()) {
-			info(format!(
+		if recheck(config, credentials, api, relay, &mut backoff).await? {
+			occupied = Some(format!(
 				"Another host connected to tunnel {id}; standing by"
 			));
-			unregister(config, credentials, relay).await;
-			standby(config, credentials, api, relay.host_id()).await?;
-			info(format!(
-				"No other host is connected to tunnel {id}; taking over"
-			));
-		} else {
-			info(format!(
-				"Relay connection closed; reconnecting in {}s",
-				backoff.as_secs()
-			));
-			pause(&mut backoff).await;
+			continue;
 		}
+		info(format!(
+			"Relay connection closed; reconnecting in {}s",
+			backoff.as_secs()
+		));
+		pause(&mut backoff).await;
+		// Another host may have connected during the wait.
+		occupied = recheck(config, credentials, api, relay, &mut backoff)
+			.await?
+			.then(|| format!("Another host is serving tunnel {id}; standing by"));
 	}
+}
+
+/// Reads and validates the tunnel, retrying transient read failures with
+/// backoff; whether another host serves it.
+async fn recheck<R: Relay>(
+	config: &Config,
+	credentials: &impl Credentials,
+	api: &impl Api,
+	relay: &R,
+	backoff: &mut Duration,
+) -> Result<bool> {
+	let tunnel = loop {
+		match fetch(credentials, api).await {
+			Ok(tunnel) => break tunnel,
+			Err(error) if error.is_transient() => retry(backoff, &error).await,
+			Err(error) => return Err(error),
+		}
+	};
+	remote::validate(&tunnel, &config.ports, config.allow_anonymous)?;
+	Ok(remote::other_host(&tunnel, relay.host_id()))
 }
 
 /// Mints a fresh host token and connects with it.
@@ -553,11 +573,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn reconnects_with_doubling_backoff_and_fresh_tokens() {
 		let credentials = FakeCredentials::default();
-		// Startup, then one read after each of the eight ended connections.
+		// Startup, then two reads around the wait after each of the eight
+		// ended connections.
 		let api = FakeApi::new(
 			[tunnel(&[])]
 				.into_iter()
-				.chain((0..8).map(|_| tunnel(&["me"]))),
+				.chain((0..16).map(|_| tunnel(&["me"]))),
 		);
 		let mut relay = FakeRelay::new(
 			(0..7)
@@ -574,9 +595,9 @@ mod tests {
 			expected.push(connect_at(second, token + 1));
 		}
 		expected.push((400, Event::Close));
-		expected.push(unregister_at(400, 10));
+		expected.push(unregister_at(400, 18));
 		assert_eq!(relay.events, expected);
-		assert_eq!(api.reads.get(), 9);
+		assert_eq!(api.reads.get(), 17);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -647,21 +668,55 @@ mod tests {
 	async fn transient_connect_token_and_read_errors_retry() {
 		let credentials = FakeCredentials::default();
 		credentials.fail_token.borrow_mut().insert(2, transient());
-		let api = FakeApi::new([tunnel(&[]), Err(transient()), tunnel(&["me"])]);
+		let api = FakeApi::new([
+			tunnel(&[]),
+			tunnel(&[]),
+			tunnel(&[]),
+			Err(transient()),
+			tunnel(&["me"]),
+			tunnel(&["me"]),
+		]);
 		let mut relay = FakeRelay::new([Err(transient()), lasting(1), Ok(FOREVER)]);
 		serve(&credentials, &api, &mut relay, Duration::from_secs(100))
 			.await
 			.unwrap();
 		let mut expected = Vec::from(add_ports());
 		expected.extend([
-			// Connect fails: wait 2 s. Token 2 fails: wait 4 s.
+			// Connect fails: wait 2 s and read. Token 2 fails: wait 4 s and read.
 			connect_at(0, 1),
 			connect_at(6, 3),
-			// The 1 s connection ends at 7 s; the read fails: wait 8 s, then
-			// reconnect after 16 s.
+			// The 1 s connection ends at 7 s; the read fails: wait 8 s, read,
+			// wait 16 s, read, reconnect.
 			connect_at(31, 4),
 			(100, Event::Close),
-			unregister_at(100, 4),
+			unregister_at(100, 7),
+		]);
+		assert_eq!(relay.events, expected);
+		assert_eq!(api.reads.get(), 6);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn host_connecting_during_the_wait_is_not_displaced() {
+		let credentials = FakeCredentials::default();
+		let api = FakeApi::new([
+			tunnel(&[]),
+			tunnel(&["me"]),
+			// Read after the 2 s wait: another host connected meanwhile.
+			tunnel(&["me", "them"]),
+			tunnel(&[]),
+		]);
+		let mut relay = FakeRelay::new([lasting(5), Ok(FOREVER)]);
+		serve(&credentials, &api, &mut relay, Duration::from_secs(100))
+			.await
+			.unwrap();
+		let mut expected = Vec::from(add_ports());
+		expected.extend([
+			connect_at(0, 1),
+			unregister_at(7, 4),
+			// The standby poll at 67 s finds no other host.
+			connect_at(67, 2),
+			(100, Event::Close),
+			unregister_at(100, 6),
 		]);
 		assert_eq!(relay.events, expected);
 	}

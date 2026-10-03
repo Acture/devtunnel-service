@@ -115,7 +115,6 @@ fn invalid_config_is_a_value_error() {
 }
 
 #[test]
-#[ignore = "exercises credentials::Cli::host_token, which is implemented separately"]
 fn missing_devtunnel_reads_like_python() {
 	let folder = Folder::new("binary");
 	let config = folder.config(

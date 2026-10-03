@@ -1,8 +1,5 @@
 //! Command-line entry point: `devtunnel-service deploy|host|renew|doctor`.
 
-// SCAFFOLD: removed once every module is implemented (stubs leave items unused).
-#![allow(dead_code)]
-
 mod config;
 mod credentials;
 mod deploy;
@@ -128,7 +125,7 @@ fn main() -> ExitCode {
 		Ok(()) => ExitCode::SUCCESS,
 		Err(error) => {
 			// Console boundary: one line for operational failures.
-			eprintln!("{error}");
+			log::failure(&error);
 			ExitCode::FAILURE
 		}
 	}

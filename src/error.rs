@@ -83,6 +83,11 @@ impl Error {
 		Self::new(name, message)
 	}
 
+	/// Text that is not UTF-8 (Python's `UnicodeDecodeError`).
+	pub(crate) fn unicode(message: impl Into<String>) -> Self {
+		Self::new("UnicodeDecodeError", message)
+	}
+
 	/// Malformed JSON (Python's `json.JSONDecodeError`).
 	pub(crate) fn json(error: &serde_json::Error) -> Self {
 		Self::new("JSONDecodeError", error.to_string())

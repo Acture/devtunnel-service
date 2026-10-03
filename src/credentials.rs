@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tunnels::management::Authorization;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// How long a minted token serves reads (tunnel checks, standby polls,
 /// unregistering) before reads mint a new one. CLI host tokens live 24 h.
@@ -31,8 +31,11 @@ impl Secret {
 	/// newline) removed; rejects an empty value or one containing anything
 	/// but visible ASCII, which could not travel in an HTTP header.
 	pub(crate) fn new(value: &str) -> Result<Self> {
-		let _ = value;
-		todo!("credentials::Secret::new")
+		let value = value.trim();
+		if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+			return Err(Error::value(UNRECOGNIZED_TOKEN_OUTPUT));
+		}
+		Ok(Self(value.to_owned()))
 	}
 
 	pub(crate) fn expose(&self) -> &str {
@@ -106,5 +109,29 @@ impl Credentials for Cli {
 
 	async fn renew(&self) -> Result<()> {
 		todo!("credentials::Cli::renew")
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn secret_strips_newline_and_rejects_header_breaking_values() {
+		assert_eq!(
+			Secret::new("eyJ.a-b_c.d\n").unwrap().expose(),
+			"eyJ.a-b_c.d"
+		);
+		for value in ["", " \n", "a b", "a\r\nX-Header: 1", "t\u{e9}"] {
+			assert_eq!(
+				Secret::new(value).unwrap_err().to_string(),
+				format!("ValueError: {UNRECOGNIZED_TOKEN_OUTPUT}")
+			);
+		}
+	}
+
+	#[test]
+	fn secret_debug_is_redacted() {
+		assert_eq!(format!("{:?}", Secret::new("token").unwrap()), "Secret(..)");
 	}
 }

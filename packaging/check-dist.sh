@@ -94,49 +94,64 @@ log "uv tool provides a persistent entry point"
 if uv tool list 2>/dev/null | grep -q '^devtunnel-service '; then
 	fail "a devtunnel-service uv tool is already installed; use a clean UV_TOOL_DIR"
 fi
+instance=acceptance
+fake=$HOME/.local/share/devtunnel-service-acceptance/devtunnel
+units=$HOME/.config/systemd/user/devtunnel-$instance
+config=$HOME/.config/devtunnel-service/$instance.json
+cleanup() {
+	if $systemd; then
+		systemctl --user disable --now "devtunnel-$instance.service" \
+			"devtunnel-$instance-renew.timer" >/dev/null 2>&1 || true
+		rm -f -- "$units"* "$config"*
+		rm -rf -- "$(dirname -- "$fake")"
+		systemctl --user daemon-reload || true
+	fi
+	uv tool uninstall devtunnel-service >/dev/null 2>&1 || true
+	rm -rf -- "$work"
+}
+if $systemd && { compgen -G "$units*" >/dev/null || [[ -e $config ]]; }; then
+	fail "an instance named $instance already exists; refusing to touch it"
+fi
+trap cleanup EXIT
 uv tool install --quiet --python "$python" "$wheel"
-trap 'uv tool uninstall devtunnel-service >/dev/null 2>&1; rm -rf -- "$work"' EXIT
 entry=$(uv tool dir --bin)/devtunnel-service
 [[ $("$entry" --version) == "devtunnel-service $version" ]] || fail "uv tool version"
-PATH=$(dirname -- "$entry"):$PATH XDG_CONFIG_HOME=$work/xdg \
-	"$entry" "${deploy[@]}" --dry-run >"$work/stdout" 2>"$work/stderr"
+# The units must reference the command found on PATH, as for a user's shell.
+PATH=$(dirname -- "$entry"):$PATH
+XDG_CONFIG_HOME=$work/xdg devtunnel-service "${deploy[@]}" --dry-run >"$work/stdout" 2>"$work/stderr"
 expect "ExecStart=\"$entry\" host --config" "$work/stdout"
 [[ ! -s $work/stderr ]] || fail "uv tool entry point was rejected: $(cat "$work/stderr")"
 empty "$work/xdg"
 
 if $systemd; then
 	log "Running user units through $entry"
-	instance=acceptance
-	fake=$HOME/.local/share/devtunnel-service-acceptance/devtunnel
 	install -D -m 0755 "$repo/packaging/fake-devtunnel" "$fake"
-	rm -f -- "$fake.log"
 	wait_for() {
+		local n
 		for _ in $(seq 30); do
-			grep -qF -- "$1" "$fake.log" 2>/dev/null && return 0
+			n=$(grep -cF -- "$1" "$fake.log" 2>/dev/null || true)
+			((${n:-0} >= $2)) && return 0
 			sleep 1
 		done
 		systemctl --user status "devtunnel-$instance.service" >&2 || true
 		journalctl --user -u "devtunnel-$instance.service" --no-pager >&2 || true
-		fail "expected '$1' in $fake.log"
+		fail "expected $2 x '$1' in $fake.log"
 	}
-	"$entry" deploy --name "$instance" --tunnel-id acceptance-tunnel --port 4000 \
+	devtunnel-service deploy --name "$instance" --tunnel-id acceptance-tunnel --port 4000 \
 		--binary "$fake" --start
-	expect "ExecStart=\"$entry\" host" "$HOME/.config/systemd/user/devtunnel-$instance.service"
-	wait_for "host acceptance-tunnel"
+	expect "ExecStart=\"$entry\" host" "$units.service"
+	wait_for "host acceptance-tunnel" 1
 	systemctl --user is-active --quiet "devtunnel-$instance.service" || fail "host is not active"
 	systemctl --user is-enabled --quiet "devtunnel-$instance-renew.timer" || fail "timer not enabled"
 	systemctl --user start "devtunnel-$instance-renew.service"
-	expect "update acceptance-tunnel --expiration 30d" "$fake.log"
+	wait_for "update acceptance-tunnel --expiration 30d" 1
 	log "Reinstalling the uv tool keeps the units' entry point valid"
 	uv tool install --quiet --force --reinstall --python "$python" "$wheel"
 	systemctl --user restart "devtunnel-$instance.service"
-	sleep 2
+	wait_for "host acceptance-tunnel" 2
 	systemctl --user is-active --quiet "devtunnel-$instance.service" || fail "host inactive after reinstall"
 	systemctl --user start "devtunnel-$instance-renew.service"
-	[[ $(grep -c '^update ' "$fake.log") == 2 ]] || fail "renewal after reinstall"
-	systemctl --user disable --now "devtunnel-$instance.service" "devtunnel-$instance-renew.timer"
-	rm -f -- "$HOME/.config/systemd/user/devtunnel-$instance"*
-	systemctl --user daemon-reload
+	wait_for "update acceptance-tunnel --expiration 30d" 2
 fi
 
 if [[ -n $out ]]; then

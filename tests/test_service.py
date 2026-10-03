@@ -495,19 +495,48 @@ class PersistenceTests(unittest.TestCase):
         self.assertIn(Path("/srv/cache").resolve(), roots)
         self.assertIn(Path("/srv/uv").resolve(), roots)
 
-    def test_tool_environment_link_is_persistent(self) -> None:
-        self.make("share/tools/devtunnel-service/pyvenv.cfg")
-        target = self.make("share/tools/devtunnel-service/bin/devtunnel-service")
+    def tool_environment(self, direct_url: dict[str, object]) -> Path:
+        # Layout of `uv tool install`: uv tags the venv itself with CACHEDIR.TAG.
+        env = "share/tools/devtunnel-service"
+        self.make(f"{env}/pyvenv.cfg")
+        self.make(f"{env}/CACHEDIR.TAG")
+        self.make(
+            f"{env}/lib/python3.12/site-packages/"
+            "devtunnel_service-0.1.0.dist-info/direct_url.json",
+            json.dumps(direct_url),
+        )
+        target = self.make(f"{env}/bin/devtunnel-service")
         link = self.root / "bin/devtunnel-service"
         link.parent.mkdir()
         link.symlink_to(target)
+        return link
+
+    def test_tool_environment_link_is_persistent(self) -> None:
+        link = self.tool_environment({"url": "file:///w.whl", "archive_info": {}})
         self.assertIsNone(self.problem(link))
+
+    def test_editable_install_is_refused(self) -> None:
+        link = self.tool_environment(
+            {"url": "file:///src/devtunnel-service", "dir_info": {"editable": True}}
+        )
+        self.assertIn("editable", self.problem(link) or "")
 
     def test_checkout_environment_is_refused(self) -> None:
         self.make("checkout/pyproject.toml")
-        self.make("checkout/.venv/pyvenv.cfg")
-        entry = self.make("checkout/.venv/bin/devtunnel-service")
-        self.assertIn("source tree", self.problem(entry) or "")
+        for env in ("checkout/.venv", "checkout/.tox/py310"):
+            with self.subTest(env=env):
+                self.make(f"{env}/pyvenv.cfg")
+                entry = self.make(f"{env}/bin/devtunnel-service")
+                self.assertIn("source tree", self.problem(entry) or "")
+
+    def test_relocated_uv_cache_is_refused(self) -> None:
+        # uvx's environment in a cache moved by uv.toml or --cache-dir, which
+        # UV_CACHE_DIR and the XDG cache directory do not reveal.
+        self.make("srv/uv-cache/CACHEDIR.TAG")
+        self.make("srv/uv-cache/archive-v0/h/pyvenv.cfg")
+        self.make("srv/uv-cache/archive-v0/h/CACHEDIR.TAG")
+        entry = self.make("srv/uv-cache/archive-v0/h/bin/devtunnel-service")
+        self.assertIn("inside the cache", self.problem(entry) or "")
 
     def test_link_into_cache_is_refused(self) -> None:
         target = self.make("cache/archive-v0/x/bin/devtunnel-service")

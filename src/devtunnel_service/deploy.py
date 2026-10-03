@@ -114,6 +114,26 @@ def transient_roots() -> list[Path]:
     return [Path(root).expanduser().resolve() for root in roots if root]
 
 
+def environment_problem(environment: Path) -> str | None:
+    """Explain why a Python environment cannot host the units' command."""
+    home = Path.home().resolve()
+    for parent in environment.parents:
+        # uv tags each venv itself with CACHEDIR.TAG; only a tag above it marks a
+        # cache (uvx), wherever uv.toml or --cache-dir put that cache.
+        if (parent / "CACHEDIR.TAG").is_file():
+            return f"its environment {environment} is inside the cache {parent}"
+        # A stray ~/pyproject.toml must not disqualify environments under $HOME.
+        if parent != home and (parent / "pyproject.toml").is_file():
+            return f"its environment {environment} is inside the source tree {parent}"
+    pattern = f"lib*/python*/site-packages/{PROGRAM.replace('-', '_')}-*.dist-info"
+    for record in environment.glob(pattern + "/direct_url.json"):
+        if json.loads(record.read_text()).get("dir_info", {}).get("editable"):
+            return (
+                f"it is an editable install that imports from a source tree ({record})"
+            )
+    return None
+
+
 def persistence_problem(entry: Path) -> str | None:
     """Explain why units must not reference ``entry``; None if it is persistent."""
     # Check the PATH-visible link and its target: both must survive the session.
@@ -125,8 +145,8 @@ def persistence_problem(entry: Path) -> str | None:
             (parent for parent in path.parents if (parent / "pyvenv.cfg").is_file()),
             None,
         )
-        if environment and (environment.parent / "pyproject.toml").is_file():
-            return f"{path} belongs to the environment of the source tree {environment.parent}"
+        if environment and (problem := environment_problem(environment)):
+            return f"{path}: {problem}"
     return None
 
 

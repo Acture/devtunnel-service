@@ -44,8 +44,10 @@ installed() { root dpkg-query -W -f '${Version}' devtunnel-service; }
 version_of() { root dpkg-deb --field "/debs/$1" Version; }
 count() { user "grep -cF -- '$1' ~/bin/devtunnel.log 2>/dev/null || true"; }
 wait_count() {
+	local n
 	for _ in $(seq 30); do
-		(($(count "$1") >= $2)) && return 0
+		n=$(count "$1")
+		((${n:-0} >= $2)) && return 0
 		sleep 1
 	done
 	echo "expected $2 x '$1' in the fake devtunnel log" >&2
@@ -86,7 +88,7 @@ log "Installing $(version_of old.deb) with networking disabled"
 root apt-get update -qq
 root apt-get install -y -qq --download-only /debs/new.deb >/dev/null
 docker network disconnect bridge "$name"
-root apt-get install -y -qq --no-download /debs/old.deb >/dev/null
+root apt-get install -y -qq /debs/old.deb >/dev/null
 [[ $(installed) == "$(version_of old.deb)" ]]
 user 'devtunnel-service --version && devtunnel-service --help >/dev/null'
 user 'python3 -c "import devtunnel_service as m, sys
@@ -111,7 +113,7 @@ systemctl --user start devtunnel-web-renew.service'
 wait_count "update accept-tunnel --expiration 30d" 1
 
 log "Upgrading offline to $(version_of new.deb)"
-root apt-get install -y -qq --no-download /debs/new.deb >/dev/null
+root apt-get install -y -qq /debs/new.deb >/dev/null
 [[ $(installed) == "$(version_of new.deb)" ]]
 user 'systemctl --user is-active --quiet devtunnel-web.service
 systemctl --user restart devtunnel-web.service'
@@ -132,7 +134,7 @@ user 'test -f ~/.config/devtunnel-service/web.json
 test -f ~/.config/systemd/user/devtunnel-web-renew.timer'
 
 log "Reinstalling resumes the existing instance"
-root apt-get install -y -qq --no-download /debs/new.deb >/dev/null
+root apt-get install -y -qq /debs/new.deb >/dev/null
 user 'systemctl --user start devtunnel-web.service'
 wait_count "host accept-tunnel" 3
 user 'systemctl --user is-active --quiet devtunnel-web.service'

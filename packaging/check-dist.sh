@@ -43,7 +43,7 @@ deploy=(deploy --name smoke --tunnel-id smoke-tunnel --port 4000 --binary /bin/s
 
 log "Building $version from a copy of the source tree"
 mkdir "$work/source"
-tar -C "$repo" --exclude=.git --exclude=.venv --exclude=dist -cf - . | tar -xf - -C "$work/source"
+tar -C "$repo" --exclude=.git --exclude=.venv --exclude=dist --exclude=target -cf - . | tar -xf - -C "$work/source"
 uv build --quiet --out-dir "$work/dist" "$work/source"
 rm -rf -- "$work/source"
 wheel=$work/dist/devtunnel_service-$version-py3-none-any.whl

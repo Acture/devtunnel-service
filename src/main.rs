@@ -207,6 +207,19 @@ mod tests {
 		assert!(args.dry_run);
 		assert_eq!((args.name.as_str(), args.tunnel_id.as_str()), ("b", "t"));
 		assert_eq!(args.binary.as_deref(), Some("-1"));
+		// Repeated --port options accumulate rather than override.
+		let args = deploy_args(&[
+			"deploy",
+			"--name",
+			"a",
+			"--tunnel-id",
+			"t",
+			"--port",
+			"1",
+			"--port",
+			"1",
+		]);
+		assert_eq!(args.ports, [1, 1]);
 		assert!(matches!(
 			parse(&["doctor", "--conf", "/c"]).unwrap().command,
 			Command::Doctor(_)

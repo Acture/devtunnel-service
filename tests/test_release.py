@@ -4,11 +4,11 @@ from pathlib import Path
 
 import devtunnel_service
 
-CHANGELOG = Path(__file__).resolve().parents[1] / "debian/changelog"
+CHANGELOG: Path = Path(__file__).resolve().parents[1] / "packaging/debian/changelog"
 
 
 class ReleaseTests(unittest.TestCase):
-    @unittest.skipUnless(CHANGELOG.is_file(), "debian/ is not part of the sdist")
+    @unittest.skipUnless(CHANGELOG.is_file(), "packaging/ is not part of the sdist")
     def test_debian_package_has_the_python_version(self) -> None:
         first = CHANGELOG.read_text().splitlines()[0]
         match = re.fullmatch(

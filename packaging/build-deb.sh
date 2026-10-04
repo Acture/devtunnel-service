@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the binary .deb from the released sdist plus this repository's debian/
-# directory, so the .deb and the Python artifacts share one version. Runs as
+# Build the binary .deb from the released sdist plus packaging/debian/, so the
+# .deb and the Python artifacts share one version. Runs as
 # root in a Debian 13 container:
 #
 #   docker run --rm -v "$PWD:/src" debian:13 \
-#       /src/packaging/build-deb.sh /src/dist/devtunnel_service-X.tar.gz /src/debs [VERSION]
+#       /src/packaging/build-deb.sh /src/dist/devtunnel_service-X.tar.gz /src/dist/debs [VERSION]
 #
 # VERSION overrides the Debian version; acceptance uses it to build an older
 # package to upgrade from. Lintian runs only on the regular build.
@@ -26,7 +26,7 @@ cp -- "$sdist" "$work/devtunnel-service_$upstream.orig.tar.gz"
 mkdir "$work/devtunnel-service-$upstream"
 cd "$work/devtunnel-service-$upstream"
 tar -xzf "$sdist" --strip-components=1
-cp -a -- "$repo/debian" .
+cp -a -- "$repo/packaging/debian" .
 if [[ -n $version ]]; then
 	sed -i "1s/([^)]*)/($version)/" debian/changelog
 fi

@@ -47,8 +47,13 @@ to the GitHub Release, with `SHA256SUMS`.
 | --- | --- | --- |
 | uv tool (persistent) | `uv tool install devtunnel-service` | after PyPI publication; until then `uv tool install` the release wheel or `git+https://github.com/Acture/devtunnel-service@vX.Y.Z` |
 | uvx (temporary) | `uvx devtunnel-service --help` | after PyPI publication; `uvx --from` the wheel works now |
-| Debian 13, Ubuntu 24.04 | `sudo apt install ./devtunnel-service_X.Y.Z-1_all.deb` | from GitHub Releases; signed apt repository planned |
+| Debian 13, Ubuntu 24.04 | `sudo apt install devtunnel-service` | amd64/arm64; register the [signed APT source](https://github.com/Acture/homebrew-ac/blob/master/docs/apt-source.md#user-installation) once |
 | Homebrew | `brew install acture/ac/devtunnel-service` | planned in the `acture/ac` tap |
+
+The APT source is hosted at `https://acture.github.io/homebrew-ac/` and uses a
+dedicated archive key through `Signed-By`. After registration, updates use normal
+APT upgrades. Direct `.deb` installation from GitHub Releases also works:
+`sudo apt install ./devtunnel-service_X.Y.Z-1_all.deb`.
 
 `uvx` runs from a temporary cache. Use it for help, `doctor`, previews or a
 foreground `host`, not for installing units: a real deployment refuses to make

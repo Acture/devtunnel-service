@@ -40,9 +40,9 @@ web application, or anything else supported by devtunnel.
   The installer always fetches the latest CLI. 0.1.0's flags and JSON shapes
   were checked against `1.0.2030+fc9273aa0f` (`devtunnel --version`). 0.2.0 reads
   only the `token` field of `devtunnel token --json` and reads the tunnel through
-  the service API; neither has yet been checked against a live CLI or service.
-  Output it does not recognize makes startup and renewal fail closed and may
-  require an update of this tool.
+  the service API; both were checked against `1.0.2094+24665e6583` and the live
+  service. Output it does not recognize makes startup and renewal fail closed
+  and may require an update of this tool.
 - An existing persistent tunnel that this CLI session can host and update, with
   its access policies already configured and the forwarded ports already added.
   Only the configured ports are forwarded, and the service refuses to create

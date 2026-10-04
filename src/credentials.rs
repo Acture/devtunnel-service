@@ -124,9 +124,21 @@ impl Cli {
 }
 
 /// The string field `token` of the JSON object in `stdout`.
+/// The token in `devtunnel token --json` output: the JSON object that starts
+/// a line, after any notice the CLI prints first (it shows a welcome banner
+/// once, on some runs).
 fn parse_token(stdout: &[u8]) -> Result<Secret> {
-	let value: Value =
-		serde_json::from_slice(stdout).map_err(|_| Error::value(UNRECOGNIZED_TOKEN_OUTPUT))?;
+	let start = stdout
+		.split_inclusive(|byte| *byte == b'\n')
+		.scan(0, |offset, line| {
+			let at = *offset;
+			*offset += line.len();
+			Some((at, line))
+		})
+		.find(|(_, line)| line.first() == Some(&b'{'))
+		.map_or(0, |(at, _)| at);
+	let value: Value = serde_json::from_slice(&stdout[start..])
+		.map_err(|_| Error::value(UNRECOGNIZED_TOKEN_OUTPUT))?;
 	let token = value
 		.as_object()
 		.and_then(|object| object.get("token"))
@@ -264,7 +276,7 @@ mod tests {
 	async fn unrecognized_token_output_is_value_error() {
 		let fake = FakeCli::new("unrecognized", r#"cat "$(dirname "$0")/stdout""#);
 		let cli = fake.cli();
-		let outputs: [&[u8]; 10] = [
+		let outputs: [&[u8]; 12] = [
 			b"not json\n",
 			b"{}\n",
 			b"{\"token\": 7}\n",
@@ -275,6 +287,8 @@ mod tests {
 			b"\"eyJ.a-b_c.d\"\n",
 			b"{\"token\": \"\xff\"}\n",
 			b"",
+			b"Welcome to dev tunnels!\n",
+			b"{\"token\": \"eyJ.a\"}\ntrailing text\n",
 		];
 		for output in outputs {
 			std::fs::write(fake.0.join("stdout"), output).unwrap();
@@ -347,5 +361,11 @@ mod tests {
 		cli.host_token().await.unwrap();
 		assert_eq!(tunnel_token(cli.read_auth().await.unwrap()), "eyJ.a-b_c.d");
 		assert_eq!(fake.calls().len(), 3);
+	}
+
+	#[test]
+	fn token_follows_a_cli_notice() {
+		let output = b"Welcome to dev tunnels!\nCLI version: 1.0.2094\n\n{\"token\": \"eyJ.a-b_c.d\", \"scope\": \"host\"}\n";
+		assert_eq!(parse_token(output).unwrap().expose(), "eyJ.a-b_c.d");
 	}
 }

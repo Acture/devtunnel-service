@@ -13,8 +13,12 @@ struct Scratch(PathBuf);
 
 impl Scratch {
 	fn new() -> Self {
+		Self::under(&std::env::temp_dir())
+	}
+
+	fn under(base: &std::path::Path) -> Self {
 		static NEXT: AtomicUsize = AtomicUsize::new(0);
-		let path = std::env::temp_dir().join(format!(
+		let path = base.join(format!(
 			"devtunnel-deploy-cli-{}-{}",
 			std::process::id(),
 			NEXT.fetch_add(1, Ordering::Relaxed)
@@ -130,6 +134,31 @@ const DRY_RUN: [&str; 7] = [
 ];
 
 #[test]
+fn empty_tmpdir_is_not_a_transient_root() {
+	// Python's tempfile.gettempdir() skips an empty TMPDIR; an empty root
+	// would contain every path.
+	let scratch = Scratch::new();
+	let output = Command::new(BINARY)
+		.args([
+			"deploy",
+			"--tunnel-id",
+			"example-api",
+			"--binary",
+			"/unused/devtunnel",
+		])
+		.args(DRY_RUN)
+		.env_clear()
+		.env("HOME", scratch.path("home"))
+		.env("PATH", "/usr/bin:/bin")
+		.env("XDG_CONFIG_HOME", scratch.path("config"))
+		.env("TMPDIR", "")
+		.output()
+		.unwrap();
+	assert_eq!(text(&output.stderr), "");
+	assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
 fn dry_run_prints_units_only() {
 	let scratch = Scratch::new();
 	let output = scratch.deploy(&DRY_RUN);
@@ -141,20 +170,24 @@ fn dry_run_prints_units_only() {
 
 #[test]
 fn uv_cache_entry_point_is_noted_then_refused() {
-	let scratch = Scratch::new();
+	// Cargo's per-target scratch directory lies outside /tmp, so the note must
+	// name UV_CACHE_DIR rather than a temporary directory.
+	let scratch = Scratch::under(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")));
 	let entry = scratch.path("uv/archive-v0/abc/bin/devtunnel-service");
 	let args = ["--name", "example", "--port", "4000", "--entry-point"];
 	let mut dry_run = args.to_vec();
 	dry_run.extend([entry.to_str().unwrap(), "--dry-run"]);
 	let output = scratch.deploy(&dry_run);
-	let stderr = text(&output.stderr);
-	assert!(
-		stderr.starts_with("Note: deployment would refuse this entry point: "),
-		"{stderr}"
-	);
-	assert!(
-		stderr.contains("uv tool install devtunnel-service"),
-		"{stderr}"
+	assert_eq!(
+		text(&output.stderr),
+		format!(
+			"Note: deployment would refuse this entry point: {} is inside the temporary or cache \
+			 directory {}; install devtunnel-service persistently (uv tool install \
+			 devtunnel-service, the Debian package or Homebrew) and run that command, or pass \
+			 --entry-point.\n",
+			entry.display(),
+			scratch.path("uv").display()
+		)
 	);
 	assert_eq!(output.status.code(), Some(0));
 

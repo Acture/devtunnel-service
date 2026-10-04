@@ -147,18 +147,24 @@ pub(crate) fn json_string(text: &str) -> String {
 	out
 }
 
-/// Python's `UnicodeDecodeError` for UTF-8 text.
+/// Python's `UnicodeDecodeError` for UTF-8 text: a bad sequence of several
+/// bytes is reported as their position range.
 fn unicode_error(bytes: &[u8], error: std::str::Utf8Error) -> Error {
 	let position = error.valid_up_to();
 	let byte = bytes[position];
-	let reason = match error.error_len() {
-		None => "unexpected end of data",
-		Some(_) if matches!(byte, 0x80..=0xc1 | 0xf5..=0xff) => "invalid start byte",
-		Some(_) => "invalid continuation byte",
+	let (end, reason) = match error.error_len() {
+		None => (bytes.len(), "unexpected end of data"),
+		Some(length) if matches!(byte, 0x80..=0xc1 | 0xf5..=0xff) => {
+			(position + length, "invalid start byte")
+		}
+		Some(length) => (position + length, "invalid continuation byte"),
 	};
-	Error::unicode(format!(
-		"'utf-8' codec can't decode byte 0x{byte:02x} in position {position}: {reason}"
-	))
+	let at = if end - position > 1 {
+		format!("bytes in position {position}-{}", end - 1)
+	} else {
+		format!("byte 0x{byte:02x} in position {position}")
+	};
+	Error::unicode(format!("'utf-8' codec can't decode {at}: {reason}"))
 }
 
 #[cfg(test)]
@@ -346,6 +352,32 @@ mod tests {
 			Config::load(&path).unwrap_err().to_string(),
 			"UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
 		);
+		// Messages from Python 3.14's bytes.decode().
+		for (bytes, message) in [
+			(
+				&b"a\xe2\x82"[..],
+				"bytes in position 1-2: unexpected end of data",
+			),
+			(
+				b"\xe2(\xa1",
+				"byte 0xe2 in position 0: invalid continuation byte",
+			),
+			(
+				b"\xf0\x90(",
+				"bytes in position 0-1: invalid continuation byte",
+			),
+			(b"\xc3", "byte 0xc3 in position 0: unexpected end of data"),
+			(
+				b"ok\xed\xa0\x80",
+				"byte 0xed in position 2: invalid continuation byte",
+			),
+		] {
+			std::fs::write(&path, bytes).unwrap();
+			assert_eq!(
+				Config::load(&path).unwrap_err().to_string(),
+				format!("UnicodeDecodeError: 'utf-8' codec can't decode {message}")
+			);
+		}
 		std::fs::write(&path, "").unwrap();
 		assert_eq!(Config::load(&path).unwrap_err().name(), "JSONDecodeError");
 		std::fs::write(&path, sample("/usr/bin/devtunnel").to_json()).unwrap();

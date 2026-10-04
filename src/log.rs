@@ -32,7 +32,30 @@ fn journal() -> bool {
 	})
 }
 
+#[cfg(test)]
+thread_local! {
+	static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test support: records this thread's log messages from now on.
+#[cfg(test)]
+pub(crate) fn capture() {
+	CAPTURED.with(|captured| *captured.borrow_mut() = Some(Vec::new()));
+}
+
+/// Test support: the messages recorded since [`capture`].
+#[cfg(test)]
+pub(crate) fn captured() -> Vec<String> {
+	CAPTURED.with(|captured| captured.borrow_mut().take().unwrap_or_default())
+}
+
 fn emit(level: Level, message: &dyn Display) {
+	#[cfg(test)]
+	CAPTURED.with(|captured| {
+		if let Some(lines) = captured.borrow_mut().as_mut() {
+			lines.push(message.to_string());
+		}
+	});
 	let prefix = match (level, journal()) {
 		(Level::Failure, true) => "<3>",
 		(Level::Warning, true) => "<4>",

@@ -176,9 +176,10 @@ fn read_error(error: &HttpError) -> Error {
 		{
 			Error::value(UNRECOGNIZED_SCHEMA)
 		}
-		HttpError::ConnectionError(error) => {
-			Error::transient(format!("Cannot reach the tunnel service: {error}"))
-		}
+		HttpError::ConnectionError(error) => Error::transient(format!(
+			"Cannot reach the tunnel service: {}",
+			sdk_text(error)
+		)),
 		HttpError::AuthorizationError(message) => Error::runtime(format!(
 			"Cannot authorize the tunnel service request: {message}"
 		)),
@@ -225,6 +226,35 @@ fn is_label(text: &str) -> bool {
 		&& text
 			.bytes()
 			.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+		// The `??--` form is reserved for IDNA (RFC 5890); invalid punycode
+		// such as `xn--a` makes the URL parser, and so the SDK, fail.
+		&& text.get(2..4) != Some("--")
+}
+
+/// SDK error text fit for one log line. The SDK's messages embed request
+/// URLs, including a proxy URL with its credentials, and raw response
+/// bodies: credentials are removed, and the text ends at its first control
+/// character, so a body cannot add lines or journal priorities.
+fn sdk_text(error: &impl std::fmt::Display) -> String {
+	let text = error.to_string();
+	let mut rest = text.split(char::is_control).next().unwrap_or_default();
+	let mut clean = String::with_capacity(rest.len());
+	while let Some(scheme) = rest.find("://") {
+		let (head, tail) = rest.split_at(scheme + 3);
+		clean.push_str(head);
+		let end = tail
+			.find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
+			.unwrap_or(tail.len());
+		let authority = &tail[..end];
+		clean.push_str(
+			authority
+				.rsplit_once('@')
+				.map_or(authority, |(_, host)| host),
+		);
+		rest = &tail[end..];
+	}
+	clean.push_str(rest);
+	clean
 }
 
 /// The `clusterId` claim of a JWT.
@@ -294,10 +324,9 @@ impl Relay for SdkRelay {
 			..Default::default()
 		};
 		bounded(REQUEST_TIMEOUT, &format!("Forwarding port {port}"), async {
-			self.host
-				.add_port(&tunnel_port)
-				.await
-				.map_err(|error| Error::runtime(format!("Cannot forward port {port}: {error}")))
+			self.host.add_port(&tunnel_port).await.map_err(|error| {
+				Error::runtime(format!("Cannot forward port {port}: {}", sdk_text(&error)))
+			})
 		})
 		.await?;
 		self.ports.push(port);
@@ -308,10 +337,9 @@ impl Relay for SdkRelay {
 	/// `port_uri_format`, when the service provides one.
 	async fn connect(&mut self, token: &Secret) -> Result<Connection> {
 		let handle = bounded(CONNECT_TIMEOUT, "Connecting to the relay", async {
-			self.host
-				.connect(token.expose())
-				.await
-				.map_err(|error| Error::transient(format!("Relay connection failed: {error}")))
+			self.host.connect(token.expose()).await.map_err(|error| {
+				Error::transient(format!("Relay connection failed: {}", sdk_text(&error)))
+			})
 		})
 		.await?;
 		let endpoint = handle.endpoint();
@@ -336,7 +364,8 @@ impl Relay for SdkRelay {
 			match self.host.unregister().await {
 				Ok(_) => Ok(()),
 				Err(error) => Err(Error::transient(format!(
-					"Cannot unregister this host: {error}"
+					"Cannot unregister this host: {}",
+					sdk_text(&error)
 				))),
 			}
 		})
@@ -436,7 +465,14 @@ mod tests {
 		unknown("example-api.", &claimed);
 		unknown(".usw2", &claimed);
 		// A cluster must be one host-name label, or the SDK panics building URLs.
-		for id in ["a.b.c", "a..b", "a.us_w2"] {
+		for id in [
+			"a.b.c",
+			"a..b",
+			"a.us_w2",
+			"a.xn--a",
+			"a.XN--usw2",
+			"a.ab--c",
+		] {
 			unknown(id, &opaque);
 		}
 	}
@@ -472,6 +508,7 @@ mod tests {
 			r#"{"clusterId":""}"#,
 			r#"{"clusterId":"us/w2"}"#,
 			r#"{"clusterId":"usw2.evil"}"#,
+			r#"{"clusterId":"xn--a"}"#,
 			r#"["usw2"]"#,
 		] {
 			unknown("example-api", &claims(payload));
@@ -570,6 +607,24 @@ mod tests {
 				.err()
 				.map(|error| error.to_string()),
 			Some(format!("ValueError: {UNKNOWN_CLUSTER}"))
+		);
+	}
+
+	#[test]
+	fn sdk_text_drops_credentials_and_extra_lines() {
+		let text = "error sending tunnel CONNECT request: response error: HTTP status 407 \
+			Proxy Authentication Required from http://alice:s3cr3t@proxy.corp:3128/ \
+			(request ID <none>): denied\n<0>forged";
+		assert_eq!(
+			sdk_text(&text),
+			"error sending tunnel CONNECT request: response error: HTTP status 407 Proxy \
+			 Authentication Required from http://proxy.corp:3128/ (request ID <none>): denied"
+		);
+		assert_eq!(
+			sdk_text(
+				&"see https://usw2.rel.tunnels.api.visualstudio.com/tunnels/x?api-version=1 and wss://u@h"
+			),
+			"see https://usw2.rel.tunnels.api.visualstudio.com/tunnels/x?api-version=1 and wss://h"
 		);
 	}
 }

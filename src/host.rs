@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -48,24 +49,39 @@ pub(crate) async fn run(action: Action, config_path: &Path) -> Result<()> {
 	let credentials = Cli::new(&config.binary, &config.tunnel_id);
 	let token = credentials.host_token().await?;
 	let service = Service::new(&config.tunnel_id, &token)?;
+	let mut stdout = std::io::stdout();
 	match action {
-		Action::Doctor => println!("{}", doctor(&config, &credentials, &service).await?),
-		Action::Renew => renew(&config, &credentials, &service).await?,
+		Action::Doctor => writeln!(stdout, "{}", doctor(&config, &credentials, &service).await?)?,
+		Action::Renew => {
+			renew(&config, &credentials, &service).await?;
+			writeln!(
+				stdout,
+				"Tunnel lease renewed; host connection not restarted."
+			)?;
+		}
 		Action::Host => {
-			let mut terminate = signal(SignalKind::terminate())?;
-			let mut interrupt = signal(SignalKind::interrupt())?;
-			let shutdown = async move {
-				let name = tokio::select! {
-					_ = terminate.recv() => "SIGTERM",
-					_ = interrupt.recv() => "SIGINT",
-				};
-				info(format!("Received {name}"));
+			let signal = shutdown_signal()?;
+			let shutdown = async {
+				info(format!("Received {}", signal.await));
 			};
 			let mut relay = service.relay();
 			host(&config, &credentials, &service, &mut relay, shutdown).await?;
 		}
 	}
 	Ok(())
+}
+
+/// Resolves with the name of the first SIGTERM or SIGINT received from now
+/// on; their default action (ending the process) no longer applies.
+fn shutdown_signal() -> Result<impl Future<Output = &'static str>> {
+	let mut terminate = signal(SignalKind::terminate())?;
+	let mut interrupt = signal(SignalKind::interrupt())?;
+	Ok(async move {
+		tokio::select! {
+			_ = terminate.recv() => "SIGTERM",
+			_ = interrupt.recv() => "SIGINT",
+		}
+	})
 }
 
 /// Reads the tunnel with the current read authorization.
@@ -100,16 +116,13 @@ pub(crate) async fn doctor(
 }
 
 /// Validates the tunnel, then renews its lease through `credentials`.
-/// Prints `Tunnel lease renewed; host connection not restarted.`
 pub(crate) async fn renew(
 	config: &Config,
 	credentials: &impl Credentials,
 	api: &impl Api,
 ) -> Result<()> {
 	check(config, credentials, api).await?;
-	credentials.renew().await?;
-	println!("Tunnel lease renewed; host connection not restarted.");
-	Ok(())
+	credentials.renew().await
 }
 
 /// Hosts the tunnel until `shutdown` resolves.
@@ -131,8 +144,8 @@ pub(crate) async fn renew(
 /// Transient errors retry; other errors return, so the process exits and
 /// systemd restarts it. While standing by, every error except a failed
 /// validation retries at the poll interval, so that a restart can never
-/// displace the healthy host. On shutdown, close the connection and
-/// unregister within [`SHUTDOWN_TIMEOUT`], then return `Ok`.
+/// displace the healthy host. On shutdown, unregister and then close the
+/// connection within [`SHUTDOWN_TIMEOUT`], then return `Ok`.
 pub(crate) async fn host<R: Relay>(
 	config: &Config,
 	credentials: &impl Credentials,
@@ -154,11 +167,13 @@ pub(crate) async fn host<R: Relay>(
 		return Err(error);
 	}
 	info(format!("Disconnecting from tunnel {}", config.tunnel_id));
+	// Unregister first: closing is the less important step, and the bound
+	// may cut the second one short.
 	let disconnect = async {
+		unregister(config, credentials, relay).await;
 		if let Some(connection) = live.take() {
 			relay.close(connection).await;
 		}
-		unregister(config, credentials, relay).await;
 	};
 	if tokio::time::timeout(SHUTDOWN_TIMEOUT, disconnect)
 		.await
@@ -594,8 +609,8 @@ mod tests {
 		for (token, second) in [0, 3, 8, 17, 34, 67, 128, 189, 251].into_iter().enumerate() {
 			expected.push(connect_at(second, token + 1));
 		}
-		expected.push((400, Event::Close));
 		expected.push(unregister_at(400, 18));
+		expected.push((400, Event::Close));
 		assert_eq!(relay.events, expected);
 		assert_eq!(api.reads.get(), 17);
 	}
@@ -611,17 +626,28 @@ mod tests {
 			tunnel(&[]),
 		]);
 		let mut relay = FakeRelay::new([lasting(10), Ok(FOREVER)]);
+		crate::log::capture();
 		serve(&credentials, &api, &mut relay, Duration::from_secs(250))
 			.await
 			.unwrap();
+		assert_eq!(
+			crate::log::captured(),
+			[
+				"Hosting tunnel example-api.usw2",
+				"Another host connected to tunnel example-api.usw2; standing by",
+				"No other host is connected to tunnel example-api.usw2; taking over",
+				"Hosting tunnel example-api.usw2",
+				"Disconnecting from tunnel example-api.usw2",
+			]
+		);
 		let mut expected = Vec::from(add_ports());
 		expected.extend([
 			connect_at(0, 1),
 			unregister_at(10, 3),
 			// Standby polls at 70, 130 and 190 s; the last finds no host.
 			connect_at(190, 2),
-			(250, Event::Close),
 			unregister_at(250, 7),
+			(250, Event::Close),
 		]);
 		assert_eq!(relay.events, expected);
 		assert_eq!(api.reads.get(), 5);
@@ -641,8 +667,8 @@ mod tests {
 			connect_at(0, 1),
 			unregister_at(10, 3),
 			connect_at(70, 2),
-			(100, Event::Close),
 			unregister_at(100, 5),
+			(100, Event::Close),
 		]);
 		assert_eq!(relay.events, expected);
 	}
@@ -652,16 +678,55 @@ mod tests {
 		let credentials = FakeCredentials::default();
 		let api = FakeApi::new([tunnel(&["them"]), tunnel(&["them"]), tunnel(&[])]);
 		let mut relay = FakeRelay::new([Ok(FOREVER)]);
+		crate::log::capture();
 		serve(&credentials, &api, &mut relay, Duration::from_secs(150))
 			.await
 			.unwrap();
+		assert_eq!(
+			crate::log::captured()[..3],
+			[
+				"Another host is serving tunnel example-api.usw2; standing by",
+				"No other host is connected to tunnel example-api.usw2; taking over",
+				"Hosting tunnel example-api.usw2",
+			]
+		);
 		let mut expected = Vec::from(add_ports());
 		expected.extend([
 			connect_at(120, 1),
-			(150, Event::Close),
 			unregister_at(150, 4),
+			(150, Event::Close),
 		]);
 		assert_eq!(relay.events, expected);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unattributed_host_connections_mean_standby() -> Result<()> {
+		let credentials = FakeCredentials::default();
+		let mut busy = tunnel(&[])?;
+		busy.status = Some(serde_json::from_value(json!({"hostConnectionCount": 1})).unwrap());
+		let api = FakeApi::new([Ok(busy), tunnel(&[])]);
+		let mut relay = FakeRelay::new([Ok(FOREVER)]);
+		serve(&credentials, &api, &mut relay, Duration::from_secs(90))
+			.await
+			.unwrap();
+		let mut expected = Vec::from(add_ports());
+		expected.extend([connect_at(60, 1), unregister_at(90, 3), (90, Event::Close)]);
+		assert_eq!(relay.events, expected);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn sigterm_and_sigint_end_hosting() {
+		for (flag, name) in [("-TERM", "SIGTERM"), ("-INT", "SIGINT")] {
+			let signal = shutdown_signal().unwrap();
+			let status = std::process::Command::new("kill")
+				.args([flag, &std::process::id().to_string()])
+				.status()
+				.unwrap();
+			assert!(status.success());
+			let received = tokio::time::timeout(Duration::from_secs(10), signal).await;
+			assert_eq!(received.unwrap(), name);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -688,8 +753,8 @@ mod tests {
 			// The 1 s connection ends at 7 s; the read fails: wait 8 s, read,
 			// wait 16 s, read, reconnect.
 			connect_at(31, 4),
-			(100, Event::Close),
 			unregister_at(100, 7),
+			(100, Event::Close),
 		]);
 		assert_eq!(relay.events, expected);
 		assert_eq!(api.reads.get(), 6);
@@ -715,8 +780,8 @@ mod tests {
 			unregister_at(7, 4),
 			// The standby poll at 67 s finds no other host.
 			connect_at(67, 2),
-			(100, Event::Close),
 			unregister_at(100, 6),
+			(100, Event::Close),
 		]);
 		assert_eq!(relay.events, expected);
 	}
@@ -817,10 +882,8 @@ mod tests {
 			relay.start.elapsed(),
 			Duration::from_secs(30) + SHUTDOWN_TIMEOUT
 		);
-		assert_eq!(
-			relay.events[3..],
-			[(30, Event::Close), unregister_at(30, 2)]
-		);
+		// The hung unregister used up the bound, so closing never started.
+		assert_eq!(relay.events[3..], [unregister_at(30, 2)]);
 	}
 
 	#[tokio::test]

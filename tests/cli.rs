@@ -1,5 +1,5 @@
-//! The command line as a black box, on paths that reach neither the devtunnel
-//! CLI nor the tunnel service.
+//! The command line as a black box, on paths that reach neither a real
+//! devtunnel CLI nor the tunnel service.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -124,4 +124,30 @@ fn missing_devtunnel_reads_like_python() {
 		&run(&["host", "--config", &config]),
 		"FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/devtunnel'",
 	);
+}
+
+#[test]
+fn allow_anonymous_warns_at_host_start_and_renew_only() {
+	// `false` stands in for a devtunnel CLI whose every command fails, so each
+	// action stops at its first token mint.
+	let failure = "RuntimeError: devtunnel token failed with exit 1; check the CLI login and \
+		tunnel permissions under the service's Unix user";
+	let warning = "Warning: allow_anonymous is enabled: anonymous access rules are accepted, \
+		and anyone who has the tunnel URL can then reach the forwarded services";
+	let folder = Folder::new("anonymous");
+	for allow in [true, false] {
+		let config = folder.config(&format!(
+			r#"{{"tunnel_id": "example-api.usw2", "binary": "/usr/bin/false", "ports": [4000], "allow_anonymous": {allow}}}"#
+		));
+		for action in ["host", "renew", "doctor"] {
+			let output = run(&[action, "--config", &config]);
+			let expected = if allow && action != "doctor" {
+				format!("{warning}\n{failure}\n")
+			} else {
+				format!("{failure}\n")
+			};
+			assert_eq!(output.status.code(), Some(1), "{action} {allow}");
+			assert_eq!(stderr(&output), expected, "{action} {allow}");
+		}
+	}
 }

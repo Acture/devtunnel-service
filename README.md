@@ -37,10 +37,12 @@ web application, or anything else supported by devtunnel.
   ```
 
   See the [official instructions](https://learn.microsoft.com/azure/developer/dev-tunnels/get-started).
-  The installer always fetches the latest CLI. Flags and JSON shapes were checked
-  against `1.0.2030+fc9273aa0f` (`devtunnel --version`). Newer CLIs whose JSON
-  output changes make startup and renewal fail closed and may require an update
-  of this tool.
+  The installer always fetches the latest CLI. 0.1.0's flags and JSON shapes
+  were checked against `1.0.2030+fc9273aa0f` (`devtunnel --version`). 0.2.0 reads
+  only the `token` field of `devtunnel token --json` and reads the tunnel through
+  the service API; neither has yet been checked against a live CLI or service.
+  Output it does not recognize makes startup and renewal fail closed and may
+  require an update of this tool.
 - An existing persistent tunnel that this CLI session can host and update, with
   its access policies already configured and the forwarded ports already added.
   Only the configured ports are forwarded, and the service refuses to create
@@ -158,19 +160,23 @@ commands use the current CLI authentication context. Operational errors print
 one line with 0.1.0's format and prefixes (`ValueError:`, `RuntimeError:`,
 `FileNotFoundError:`, ...) and exit with status 1.
 
-The service never displaces a live host. At start and after a disconnect, if
-another host is connected to the tunnel, it stands by, rechecks every minute,
-and takes over once none is connected; displacement, standby and takeover are
-logged. An endpoint left by a host that exited uncleanly can delay the takeover
-by about 1–2 minutes. On SIGTERM or SIGINT (`systemctl --user stop` or
-`restart`) it unregisters its endpoint before exiting.
+The service never displaces a live host. Before every connection, at start and
+after a disconnect or a wait, it reads the tunnel; if another host is connected,
+or the service reports host connections it lists no endpoint for, it stands by,
+rechecks every minute, and takes over once none is connected. Displacement,
+standby and takeover are logged. An endpoint or connection left by a host that
+exited uncleanly, this service included, can delay the takeover by about 1–2
+minutes. On SIGTERM or SIGINT (`systemctl --user stop` or `restart`) it
+unregisters its endpoint before exiting.
 
-Network and relay failures reconnect with backoff, from 2 seconds doubling up to
-60. Login, permission and check failures exit with status 1, so systemd shows
-them and restarts the host after 30 seconds; while standing by, only failed
-checks exit and other errors are retried at the next poll. If credentials expire
-or access is revoked, fix the CLI context outside this wrapper; restarting the
-service is **not** a substitute for login or credential renewal.
+Once hosting has started, network, relay and service failures (timeouts, HTTP
+5xx) reconnect with backoff, from 2 seconds doubling up to 60. Any failure
+before the first connection, network failures included, and login, permission
+and check failures at any time exit with status 1, so systemd shows them and
+restarts the host after 30 seconds; while standing by, only failed checks exit
+and other errors are retried at the next poll. If credentials expire or access
+is revoked, fix the CLI context outside this wrapper; restarting the service is
+**not** a substitute for login or credential renewal.
 
 A separate daily timer extends the tunnel lease to 30 days without intentionally
 restarting its host connection. Lease renewal is not authentication-token
@@ -242,13 +248,22 @@ See Microsoft's [security documentation](https://learn.microsoft.com/en-us/azure
   `doctor` reports observed anonymous access.
 - A live host is never displaced: the service stands by and takes over later,
   and unregisters its endpoint when stopped.
-- Network and relay failures reconnect with backoff; other failures exit with
-  status 1 for systemd to restart.
+- Once hosting has started, network and relay failures reconnect with backoff;
+  other failures exit with status 1 for systemd to restart.
 - Logs carry journal priorities and each port's forwarding URL.
 - Units no longer set `Environment=PYTHONDONTWRITEBYTECODE=1`. Existing units
   and configurations keep working with the new command at the same path;
-  redeploying rewrites the units, with `.previous` backups.
-- Error lines keep 0.1.0's one-line format and prefixes.
+  redeploying rewrites the units, with `.previous` backups. `deploy --start`
+  confirms with "host readiness" instead of "CLI readiness".
+- Error lines keep 0.1.0's one-line format and prefixes. The command line keeps
+  argparse's grammar (unique option prefixes, the last repeated option wins,
+  `--port` read like `int()`), but help text differs, and a trailing `--` is
+  accepted.
+- Smaller differences: configurations with `NaN` or `Infinity` are malformed
+  JSON; `~user` paths are refused instead of expanded; executable checks accept
+  any execute permission bit rather than asking the kernel; a tunnel ID's
+  cluster (`ID.CLUSTER`, or the token's when the ID is bare) must be a single
+  host-name label.
 
 ## Development and verification
 

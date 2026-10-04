@@ -82,22 +82,27 @@ pub(crate) fn validate(tunnel: &Tunnel, ports: &[u16], allow_anonymous: bool) ->
 	Ok(Checked { anonymous_access })
 }
 
-/// Whether another host serves the tunnel: the service reports host
-/// connections (or omits the count) and some endpoint belongs to a host
-/// other than `own_host_id` (`None` before this process first connected).
-/// A reported count of zero means no host is connected, whatever endpoints
-/// remain registered.
+/// Whether another host serves the tunnel, judged while this host is not
+/// connected. A reported host-connection count of zero means no host is
+/// connected, whatever endpoints remain registered. Otherwise another host
+/// is present when an endpoint belongs to a host other than `own_host_id`
+/// (`None` before this process first connected), and also when the service
+/// reports connections but lists no endpoint to attribute them to, so the
+/// check fails closed. No count and no endpoints means no host.
 pub(crate) fn other_host(tunnel: &Tunnel, own_host_id: Option<&str>) -> bool {
-	let connected = tunnel
+	let count = tunnel
 		.status
 		.as_ref()
 		.and_then(|status| status.host_connection_count.as_ref())
-		.is_none_or(|count| count.get_count() > 0);
-	connected
-		&& tunnel
+		.map(|count| count.get_count());
+	match count {
+		Some(0) => false,
+		Some(_) if tunnel.endpoints.is_empty() => true,
+		_ => tunnel
 			.endpoints
 			.iter()
-			.any(|endpoint| Some(endpoint.host_id.as_str()) != own_host_id)
+			.any(|endpoint| Some(endpoint.host_id.as_str()) != own_host_id),
+	}
 }
 
 #[cfg(test)]
@@ -257,7 +262,10 @@ mod tests {
 
 	#[test]
 	fn detects_other_hosts() {
-		assert!(!other_host(&hosted(&[], Some(json!(1))), Some("me")));
+		assert!(!other_host(&hosted(&[], None), Some("me")));
+		// Connections without endpoints cannot be attributed: fail closed.
+		assert!(other_host(&hosted(&[], Some(json!(1))), Some("me")));
+		assert!(other_host(&hosted(&[], Some(json!(1))), None));
 		assert!(!other_host(&hosted(&["me"], Some(json!(1))), Some("me")));
 		assert!(other_host(
 			&hosted(&["me", "them"], Some(json!(1))),

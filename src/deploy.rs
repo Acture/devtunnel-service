@@ -53,7 +53,8 @@ pub(crate) struct Environment {
 	pub uv_cache_dir: Option<PathBuf>,
 	/// `PATH`, for finding `devtunnel` and `devtunnel-service`.
 	pub path: Option<OsString>,
-	/// `tempfile.gettempdir()`: `std::env::temp_dir()`.
+	/// `tempfile.gettempdir()`: the first nonempty `TMPDIR`, `TEMP` or `TMP`,
+	/// else `/tmp`.
 	pub temp_dir: PathBuf,
 }
 
@@ -72,7 +73,10 @@ impl Environment {
 			cache_home: var("XDG_CACHE_HOME"),
 			uv_cache_dir: var("UV_CACHE_DIR"),
 			path: std::env::var_os("PATH"),
-			temp_dir: std::env::temp_dir(),
+			temp_dir: ["TMPDIR", "TEMP", "TMP"]
+				.into_iter()
+				.find_map(var)
+				.unwrap_or_else(|| PathBuf::from("/tmp")),
 		})
 	}
 }
@@ -271,7 +275,7 @@ pub(crate) fn write_private(path: &Path, text: &str) -> Result<()> {
 /// `Path(path).expanduser().resolve()`, which is not strict: what cannot be
 /// resolved stays as given.
 fn resolve_lenient(path: &Path, home: &Path) -> PathBuf {
-	let path = expand_user(path, home);
+	let path = expand_user(path, home).unwrap_or_else(|_| path.to_path_buf());
 	resolve(&path).unwrap_or(path)
 }
 
@@ -296,15 +300,17 @@ pub(crate) fn transient_roots(env: &Environment) -> Vec<PathBuf> {
 }
 
 /// The nearest proper ancestor of `path` that marks a cache (`CACHEDIR.TAG`)
-/// or, unless it is `home`, a source tree, with its kind.
+/// or, unless it is the resolved `home` under any spelling, a source tree,
+/// with its kind.
 fn enclosing<'a>(path: &'a Path, home: &Path) -> Option<(&'static str, &'a Path)> {
 	path.ancestors().skip(1).find_map(|parent| {
 		if parent.join("CACHEDIR.TAG").is_file() {
 			Some(("cache", parent))
-		} else if parent != home
-			&& ["pyproject.toml", "Cargo.toml"]
-				.iter()
-				.any(|marker| parent.join(marker).is_file())
+		} else if ["pyproject.toml", "Cargo.toml"]
+			.iter()
+			.any(|marker| parent.join(marker).is_file())
+			&& parent != home
+			&& resolve(parent).ok().as_deref() != Some(home)
 		{
 			Some(("source tree", parent))
 		} else {
@@ -448,7 +454,7 @@ pub(crate) fn entry_point(explicit: Option<&Path>, env: &Environment) -> Result<
 		None => which(PROGRAM, env.path.as_deref())
 			.ok_or_else(|| Error::value(format!("No {PROGRAM} command on PATH; {REMEDY}")))?,
 	};
-	let found = expand_user(&found, &env.home);
+	let found = expand_user(&found, &env.home)?;
 	absolute(&found).map_err(at(&found))
 }
 
@@ -510,7 +516,7 @@ pub(crate) async fn deploy(
 			Error::value("Install the official devtunnel CLI first, or pass --binary")
 		})?,
 	};
-	let binary = expand_user(&binary, &env.home);
+	let binary = expand_user(&binary, &env.home)?;
 	let devtunnel = resolve(&binary).map_err(at(&binary))?;
 	let mut ports = request.ports.clone();
 	ports.sort_unstable();
@@ -525,7 +531,7 @@ pub(crate) async fn deploy(
 			.as_deref()
 			.unwrap_or(&env.home.join(".config")),
 		&env.home,
-	);
+	)?;
 	let config_root = resolve(&config_root).map_err(at(&config_root))?;
 	let config_dir = config_root.join("devtunnel-service");
 	let config_path = config_dir.join(format!("{}.json", request.name));
@@ -1511,8 +1517,8 @@ mod tests {
 	#[tokio::test]
 	async fn uvx_cache_entry_is_refused() {
 		let (scratch, env, request) = fixture();
-		let cache = scratch.path("uv");
-		fs::create_dir(&cache).unwrap();
+		// Outside every other transient root, so only UV_CACHE_DIR matches.
+		let cache = PathBuf::from("/nonexistent/uv-cache");
 		let env = Environment {
 			uv_cache_dir: Some(cache.clone()),
 			..env
@@ -1529,8 +1535,15 @@ mod tests {
 		let system = Fake::new(0, "not-found\n");
 		let (result, out, err) = run(&dry_run, &env, &system).await;
 		result.unwrap();
-		assert!(err.contains("would refuse"), "{err}");
-		assert!(err.contains("uv tool install devtunnel-service"), "{err}");
+		assert_eq!(
+			err,
+			format!(
+				"Note: deployment would refuse this entry point: {} is inside the temporary or \
+				 cache directory {}; {REMEDY}.\n",
+				entry.display(),
+				cache.display()
+			)
+		);
 		assert!(out.contains(entry.to_str().unwrap()));
 		let error = failure(&request, &env, &system).await;
 		assert!(
@@ -1739,6 +1752,22 @@ mod tests {
 			assert_eq!(problem(&scratch, &entry), "");
 		}
 		assert_eq!(problem(&scratch, Path::new(ENTRY)), "");
+	}
+
+	#[test]
+	fn stray_manifests_in_a_symlinked_home_are_ignored() {
+		let scratch = Scratch::new();
+		scratch.make("data/u/Cargo.toml", "");
+		scratch.make("data/u/pyproject.toml", "");
+		scratch.make("data/u/.cargo/bin/devtunnel-service", "");
+		let home = scratch.link("homes/u", &scratch.path("data/u"));
+		let resolved = resolve(&home).unwrap();
+		// The entry keeps the PATH spelling through the link; home is resolved.
+		let entry = home.join(".cargo/bin/devtunnel-service");
+		assert_eq!(persistence_problem(&entry, &[], &resolved), None);
+		scratch.make("data/u/project/Cargo.toml", "");
+		let built = home.join("project/target/debug/devtunnel-service");
+		assert!(persistence_problem(&built, &[], &resolved).is_some());
 	}
 
 	#[test]

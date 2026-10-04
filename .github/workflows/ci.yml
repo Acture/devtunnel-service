@@ -43,6 +43,58 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv run --locked python -m unittest discover --start-directory tests -v
 
+  rust:
+    name: rust (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Static musl build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          target=$(uname -m)-unknown-linux-musl
+          rustup target add "$target"
+          cargo build --locked --release --target "$target"
+          binary=target/$target/release/devtunnel-service
+          info=$(file -b "$binary")
+          echo "$info"
+          if [[ $info != *static* ]]; then
+            # ldd exits nonzero for a static binary; judge its message only.
+            deps=$(ldd "$binary" 2>&1 || true)
+            echo "$deps"
+            [[ $deps == *'not a dynamic executable'* ]]
+          fi
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$version"
+          test "$("$binary" --version)" = "devtunnel-service $version"
+
+  rust-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - run: cargo install cargo-audit --locked
+      # Reads .cargo/audit.toml for the accepted advisories.
+      - run: cargo audit
+
   dist:
     name: dist (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
@@ -127,7 +179,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test, dist, deb-check]
+    needs: [lint, test, rust, rust-audit, dist, deb-check]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

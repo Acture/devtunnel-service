@@ -1,0 +1,27 @@
+# Advisories accepted for the dev-tunnels SDK revision pinned in Cargo.toml.
+# All of them come from russh 0.37.1, which the SDK pins; no patched version
+# is compatible with it. Revisit each entry when the SDK revision changes.
+[advisories]
+ignore = [
+	# russh-cryptovec 0.7.3: remote SSH traffic, notably zlib decompression
+	# output, grows CryptoVec buffers unchecked, and allocation failure aborts
+	# the process. The SDK's per-client SSH server offers compression, so any
+	# client admitted by the tunnel's access control (anyone, with
+	# allow_anonymous) can crash the host. Impact is denial of service only;
+	# systemd restarts the host after 30 s.
+	"RUSTSEC-2026-0153",
+	# russh 0.37.1: SSH agent client and server accept unbounded frame lengths.
+	# The SDK never uses an SSH agent, so the code is unreachable.
+	"RUSTSEC-2026-0154",
+	# ed25519-dalek 1.0.1: signing with a caller-supplied public key leaks the
+	# private key. Only russh-keys links it; the host signs with its own RSA
+	# key and never with a decoupled Ed25519 keypair.
+	"RUSTSEC-2022-0093",
+	# curve25519-dalek 3.2.0: timing variability in scalar subtraction. Key
+	# exchange uses fresh ephemeral scalars per SSH session, and the variation
+	# is not measurable across the network path through the relay.
+	"RUSTSEC-2024-0344",
+	# rand 0.7.3 (via ed25519-dalek): unsound only with a custom `log` logger
+	# that calls rand; this binary installs no logger.
+	"RUSTSEC-2026-0097",
+]

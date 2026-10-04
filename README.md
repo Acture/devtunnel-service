@@ -252,6 +252,12 @@ See Microsoft's [security documentation](https://learn.microsoft.com/en-us/azure
 
 ## Development and verification
 
+The Rust crate is rooted at `Cargo.toml` with its sources in `src/*.rs`; the
+Python package lives in `src/devtunnel_service/`. Tests of both live in
+`tests/`, and distribution packaging in `packaging/`, including Debian
+metadata in `packaging/debian/`. CI writes built packages and release staging
+files under the Git-ignored `dist/`.
+
 The Rust implementation:
 
 ```bash
@@ -282,7 +288,7 @@ Packaging acceptance lives in `packaging/` and runs in CI:
   that copy, and checks both artifacts (including the test suite shipped in the
   sdist), uvx, and the uv tool entry point. With `--systemd` it deploys real
   user units against an offline fake devtunnel CLI.
-- `build-deb.sh` builds the `.deb` from that sdist and `debian/` on Debian 13
+- `build-deb.sh` builds the `.deb` from that sdist and `packaging/debian/` on Debian 13
   and runs lintian.
 - `check-deb.sh` installs, upgrades, removes, purges and reinstalls the `.deb`
   on Debian 13 or Ubuntu 24.04 under a real systemd user manager, with

@@ -144,15 +144,15 @@ jobs:
           version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/devtunnel_service/__init__.py)
           sdist=dist/devtunnel_service-$version.tar.gz
           build() { docker run --rm --volume "$PWD:/src" --workdir /src debian:13 packaging/build-deb.sh "$@"; }
-          build "$sdist" debs
+          build "$sdist" dist/debs
           # An older revision of the same source, to test upgrading to the release.
-          build "$sdist" debs-old "$version-0~acceptance1"
+          build "$sdist" dist/debs-old "$version-0~acceptance1"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: debs
           path: |
-            debs/
-            debs-old/
+            dist/debs/
+            dist/debs-old/
           if-no-files-found: error
 
   deb-check:
@@ -171,8 +171,9 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: debs
+          path: dist
       - name: Install, upgrade and remove
-        run: packaging/check-deb.sh "$IMAGE" debs-old/*.deb debs/*.deb
+        run: packaging/check-deb.sh "$IMAGE" dist/debs-old/*.deb dist/debs/*.deb
         env:
           IMAGE: ${{ matrix.image }}
 
@@ -189,19 +190,19 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
-          path: release
+          path: dist/release
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: debs
-          path: debs
+          path: dist
       - name: Publish the accepted artifacts as a GitHub Release
         run: |
           version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/devtunnel_service/__init__.py)
           test "$GITHUB_REF_NAME" = "v$version"
-          cp debs/debs/*.deb release/
-          (cd release && sha256sum -- * >SHA256SUMS)
+          cp dist/debs/*.deb dist/release/
+          (cd dist/release && sha256sum -- * >SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
             --notes "Wheel, sdist and Debian/Ubuntu package for devtunnel-service $version." \
-            release/*
+            dist/release/*
         env:
           GH_TOKEN: ${{ github.token }}
